@@ -41,8 +41,18 @@ public class MainApp extends Application {
         StackPane keyFallContainer = new StackPane(keyFallCanvas);
         keyFallContainer.getStyleClass().add("keyfall-container");
         keyFallContainer.setPadding(new Insets(12, 16, 16, 16));
-        keyFallContainer.widthProperty().addListener((obs, oldV, newV) -> keyFallCanvas.setWidth(newV.doubleValue()));
-        keyFallContainer.heightProperty().addListener((obs, oldV, newV) -> keyFallCanvas.setHeight(newV.doubleValue()));
+        keyFallContainer.widthProperty().addListener((obs, oldV, newV) -> {
+            double width = newV.doubleValue();
+            if (width > 0) {
+                keyFallCanvas.setWidth(width);
+            }
+        });
+        keyFallContainer.heightProperty().addListener((obs, oldV, newV) -> {
+            double height = newV.doubleValue();
+            if (height > 0) {
+                keyFallCanvas.setHeight(height);
+            }
+        });
 
         ComboBox<MidiService.MidiInput> deviceCombo = new ComboBox<>();
         deviceCombo.setPromptText("MIDI input");
