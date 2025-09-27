@@ -100,15 +100,11 @@ public class MidiRecorder {
     }
 
     private void enqueue(ShortMessage message, long micros) {
-        try {
-            long deltaMicros = micros - lastEventMicros;
-            long deltaTicks = microsToTicks(deltaMicros);
-            lastTick += deltaTicks;
-            lastEventMicros = micros;
-            track.add(new MidiEvent(message, lastTick));
-        } catch (InvalidMidiDataException e) {
-            throw new IllegalStateException("Unable to record MIDI event", e);
-        }
+        long deltaMicros = micros - lastEventMicros;
+        long deltaTicks = microsToTicks(deltaMicros);
+        lastTick += deltaTicks;
+        lastEventMicros = micros;
+        track.add(new MidiEvent(message, lastTick));
     }
 
     private void addTempoMeta(int microsecondsPerQuarter, long micros) {
