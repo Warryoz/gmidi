@@ -6,6 +6,7 @@ import com.gmidi.midi.MidiRecordingSession;
 import com.gmidi.midi.RecordingFileNamer;
 import java.io.InputStream;
 import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -30,7 +31,7 @@ public final class MidiRecorderCli {
     }
 
     public int run() {
-        try (Scanner scanner = new Scanner(in, java.nio.charset.StandardCharsets.UTF_8.name())) {
+        try (Scanner scanner = new Scanner(in, StandardCharsets.UTF_8)) {
             List<MidiDevice.Info> inputs = MidiDeviceUtils.listInputDevices();
             if (inputs.isEmpty()) {
                 out.println("No MIDI input devices were found. Connect a controller and try again.");
@@ -40,10 +41,12 @@ public final class MidiRecorderCli {
             printDeviceList(inputs);
             MidiDevice.Info selectedDevice = selectDevice(scanner, inputs);
             Path outputPath = requestOutputPath(scanner);
+
             if (outputPath == null) {
                 out.println("Recording cancelled.");
                 return 1;
             }
+
 
             MidiRecordingSession session = new MidiRecordingSession();
             ConsoleRecordingInteraction interaction = new ConsoleRecordingInteraction(out, scanner);

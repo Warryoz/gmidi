@@ -6,8 +6,10 @@ GMIDI is a Java 21 toolkit for capturing MIDI performances that will evolve into
 
 - **Core MIDI services (`com.gmidi.midi`, `com.gmidi.recorder`)** – Pure Java classes that discover devices, manage recording sessions, and expose UI-agnostic hooks.
 - **Console front-end (`com.gmidi.cli`)** – A thin command line layer that formats prompts, resolves output paths, and delegates the actual recording to the core services.
+- 
 - **Desktop front-end (`com.gmidi.ui`)** – A JavaFX scene graph that lists MIDI inputs, renders an 88-key piano, and mirrors incoming notes while the shared session persists the MIDI file.
 - **Interaction abstraction** – `RecordingInteraction` defines the lifecycle callbacks and (optionally) receiver decoration that a UI must provide so the core session can remain oblivious to presentation concerns.
+
 
 ## Prerequisites
 
@@ -78,3 +80,8 @@ If Gradle cannot download dependencies in your environment, run `gradle test` wi
 - Add richer transport controls (metronome, configurable count-in, punch in/out) on top of the existing interaction contract.
 - Provide velocity-aware colouring and sustain-pedal overlays on the keyboard visualiser.
 - Record and surface session metadata to feed future playback and visualization features.
+
+- Introduce a desktop-friendly interface that visualizes pressed keys while delegating recording to the shared services.
+- Expand `RecordingInteraction` implementations to support richer UX (count-in, metronome, visual cues).
+- Add persistence for session metadata to feed future playback and visualization features.
+

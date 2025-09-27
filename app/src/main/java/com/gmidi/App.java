@@ -1,7 +1,6 @@
 package com.gmidi;
 
 import com.gmidi.cli.MidiRecorderCli;
-import com.gmidi.ui.MidiRecorderApp;
 import java.io.InputStream;
 import java.io.PrintStream;
 
@@ -19,15 +18,15 @@ public final class App {
             MidiRecorderApp.launchApp();
             return;
         }
+        int exitCode = run();
 
-        int exitCode = run(System.in, System.out);
         if (exitCode != 0) {
             System.exit(exitCode);
         }
     }
 
-    static int run(InputStream in, PrintStream out) {
-        MidiRecorderCli cli = new MidiRecorderCli(in, out);
+    static int run() {
+        MidiRecorderCli cli = new MidiRecorderCli(System.in, System.out);
         return cli.run();
     }
 }

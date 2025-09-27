@@ -35,4 +35,5 @@ public interface RecordingInteraction {
     default javax.sound.midi.Receiver decorateReceiver(javax.sound.midi.Receiver downstream) {
         return downstream;
     }
+
 }
