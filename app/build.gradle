@@ -48,7 +48,6 @@ application {
     mainClass = 'com.gmidi.App'
     applicationDefaultJvmArgs = [nativeAccessArg]
 }
-
 tasks.withType(JavaExec).configureEach {
     modularity.inferModulePath = true
     jvmArgs nativeAccessArg
