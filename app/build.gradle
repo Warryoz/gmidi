@@ -1,5 +1,6 @@
 plugins {
     id 'application'
+    id 'org.openjfx.javafxplugin' version '0.0.14'
 }
 
 repositories {
@@ -11,6 +12,11 @@ dependencies {
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
+javafx {
+    version = '21.0.2'
+    modules = ['javafx.controls']
+}
+
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(21)
@@ -18,7 +24,9 @@ java {
 }
 
 application {
+    mainModule = 'com.gmidi'
     mainClass = 'com.gmidi.App'
+    applicationDefaultJvmArgs = ['--enable-native-access=ALL-UNNAMED']
 }
 
 tasks.named('test') {
