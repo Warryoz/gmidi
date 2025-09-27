@@ -43,6 +43,9 @@ import javafx.stage.Stage;
  */
 public final class MidiRecorderApp extends Application {
 
+    private static final String STATUS_SELECT_DEVICE = "Select a MIDI input and press Record.";
+    private static final String STATUS_NO_DEVICE = "No MIDI input devices found.";
+
     private final ObservableList<MidiDevice.Info> availableDevices = FXCollections.observableArrayList();
 
     private ComboBox<MidiDevice.Info> deviceSelector;
@@ -140,7 +143,7 @@ public final class MidiRecorderApp extends Application {
 
         HBox buttons = new HBox(12, recordButton, stopButton);
 
-        statusLabel = new Label("Select a MIDI input and press Record.");
+        statusLabel = new Label(STATUS_SELECT_DEVICE);
         statusLabel.setWrapText(true);
         statusLabel.setMaxWidth(Double.MAX_VALUE);
 
@@ -159,10 +162,10 @@ public final class MidiRecorderApp extends Application {
         availableDevices.setAll(devices);
         if (devices.isEmpty()) {
             deviceSelector.getSelectionModel().clearSelection();
-            statusLabel.setText("No MIDI input devices found.");
+            statusLabel.setText(STATUS_NO_DEVICE);
         } else {
             deviceSelector.getSelectionModel().selectFirst();
-            statusLabel.setText("Select a MIDI input and press Record.");
+            statusLabel.setText(STATUS_SELECT_DEVICE);
         }
         if (currentInteraction == null) {
             restoreIdleControls();
@@ -176,18 +179,13 @@ public final class MidiRecorderApp extends Application {
             return;
         }
 
-        FileChooser chooser = new FileChooser();
-        chooser.setTitle("Save MIDI recording");
-        chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("MIDI files", "*.mid", "*.midi"));
-        chooser.setInitialFileName(RecordingFileNamer.defaultFileName());
-        java.io.File file = chooser.showSaveDialog(primaryStage);
-        if (file == null) {
+        Path outputPath = chooseOutputPath();
+        if (outputPath == null) {
             statusLabel.setText("Recording cancelled.");
             restoreIdleControls();
             return;
         }
 
-        Path outputPath = file.toPath();
         recordButton.setDisable(true);
         stopButton.setDisable(true);
         deviceSelector.setDisable(true);
@@ -199,6 +197,15 @@ public final class MidiRecorderApp extends Application {
         currentInteraction = interaction;
 
         executor.submit(() -> runRecording(deviceInfo, outputPath, interaction));
+    }
+
+    private Path chooseOutputPath() {
+        FileChooser chooser = new FileChooser();
+        chooser.setTitle("Save MIDI recording");
+        chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("MIDI files", "*.mid", "*.midi"));
+        chooser.setInitialFileName(RecordingFileNamer.defaultFileName());
+        java.io.File file = chooser.showSaveDialog(primaryStage);
+        return file != null ? file.toPath() : null;
     }
 
     private void runRecording(MidiDevice.Info deviceInfo, Path outputPath, FxRecordingInteraction interaction) {
@@ -263,6 +270,9 @@ public final class MidiRecorderApp extends Application {
         }
         if (keyboardView != null) {
             keyboardView.clearPressedNotes();
+        }
+        if (statusLabel != null && hasDevice) {
+            statusLabel.setText(STATUS_SELECT_DEVICE);
         }
     }
 

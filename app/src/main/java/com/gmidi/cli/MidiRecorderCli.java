@@ -6,6 +6,7 @@ import com.gmidi.midi.MidiRecordingSession;
 import com.gmidi.midi.RecordingFileNamer;
 import java.io.InputStream;
 import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -30,7 +31,7 @@ public final class MidiRecorderCli {
     }
 
     public int run() {
-        try (Scanner scanner = new Scanner(in, java.nio.charset.StandardCharsets.UTF_8.name())) {
+        try (Scanner scanner = new Scanner(in, StandardCharsets.UTF_8)) {
             List<MidiDevice.Info> inputs = MidiDeviceUtils.listInputDevices();
             if (inputs.isEmpty()) {
                 out.println("No MIDI input devices were found. Connect a controller and try again.");
@@ -62,15 +63,16 @@ public final class MidiRecorderCli {
         out.println("Available MIDI input devices:");
         for (int i = 0; i < inputs.size(); i++) {
             Info info = inputs.get(i);
-            out.printf("[%d] %s — %s (%s)%n", i, info.getName(), info.getDescription(), info.getVendor());
+            out.printf(Locale.ROOT, "[%d] %s — %s (%s)%n", i,
+                    info.getName(), info.getDescription(), info.getVendor());
         }
     }
 
     private MidiDevice.Info selectDevice(Scanner scanner, List<MidiDevice.Info> inputs) {
-        out.printf("Select a device [0-%d] (press Enter for 0):%n", inputs.size() - 1);
+        out.printf(Locale.ROOT, "Select a device [0-%d] (press Enter for 0):%n", inputs.size() - 1);
         int selection = readDeviceSelection(scanner, inputs.size());
         MidiDevice.Info selectedDevice = inputs.get(selection);
-        out.printf("Selected '%s'.%n", selectedDevice.getName());
+        out.printf(Locale.ROOT, "Selected '%s'.%n", selectedDevice.getName());
         return selectedDevice;
     }
 
@@ -85,7 +87,7 @@ public final class MidiRecorderCli {
                 if (value >= 0 && value < deviceCount) {
                     return value;
                 }
-                out.printf("Please enter a value between 0 and %d.%n", deviceCount - 1);
+                out.printf(Locale.ROOT, "Please enter a value between 0 and %d.%n", deviceCount - 1);
             } catch (NumberFormatException ex) {
                 out.println("Enter a numeric index or press Enter for the default.");
             }
@@ -94,7 +96,7 @@ public final class MidiRecorderCli {
 
     private Path requestOutputPath(Scanner scanner) {
         String defaultFileName = RecordingFileNamer.defaultFileName();
-        out.printf("Enter output file path (press Enter for %s):%n", defaultFileName);
+        out.printf(Locale.ROOT, "Enter output file path (press Enter for %s):%n", defaultFileName);
         while (true) {
             String line = scanner.nextLine().trim();
             Path path = line.isEmpty() ? Paths.get(defaultFileName) : Paths.get(line);
@@ -105,7 +107,7 @@ public final class MidiRecorderCli {
                     Files.createDirectories(parent);
                 }
                 if (Files.exists(absolute)) {
-                    out.printf("File %s already exists. Overwrite? [y/N]%n", absolute);
+                    out.printf(Locale.ROOT, "File %s already exists. Overwrite? [y/N]%n", absolute);
                     String confirmation = scanner.nextLine().trim().toLowerCase(Locale.ROOT);
                     if (!confirmation.equals("y") && !confirmation.equals("yes")) {
                         out.println("Choose a different file name:");

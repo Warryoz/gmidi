@@ -55,7 +55,10 @@ The JavaFX interface shows a scrolling keyboard and flashes keys as you play. Ru
 ./gradlew :app:run --args="--gui"
 ```
 
-or directly via the JDK (again pointing at the JavaFX SDK and enabling native access):
+You can place `--gui` anywhere in the argument list—the launcher scans all arguments and opens the
+desktop experience when it finds the flag.
+
+Launch directly via the JDK (again pointing at the JavaFX SDK and enabling native access):
 
 ```bash
 PATH_TO_FX="$HOME/.gradle/caches/modules-2/files-2.1/org.openjfx"
