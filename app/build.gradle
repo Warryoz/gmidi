@@ -36,7 +36,7 @@ java {
 application {
     // Must match your module-info.java and Application class:
     mainModule = 'com.gmidi'
-    mainClass  = 'com.gmidi.App'
+    mainClass  = 'com.gmidi.MainApp'
     applicationDefaultJvmArgs = [nativeAccessArg, allowUnsafeMem]
 }
 

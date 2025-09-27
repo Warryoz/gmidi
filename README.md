@@ -1,93 +1,93 @@
-# gmidi
+# GMIDI Recorder
 
-GMIDI is a Java 21 toolkit for capturing MIDI performances that will evolve into a visual piano experience. The first milestone is a console recorder that writes Standard MIDI Files (`.mid`). This iteration focuses on readability and scalability so the same core logic can power future graphical interfaces.
+GMIDI Recorder is a JavaFX 21 desktop application for capturing live MIDI performances while
+visualising the keyboard and optionally encoding a 60 FPS MP4 “key-fall” video with ffmpeg.
 
-## Architecture at a glance
+## Requirements
 
-- **Core MIDI services (`com.gmidi.midi`, `com.gmidi.recorder`)** – Pure Java classes that discover devices, manage recording sessions, and expose UI-agnostic hooks.
-- **Console front-end (`com.gmidi.cli`)** – A thin command line layer that formats prompts, resolves output paths, and delegates the actual recording to the core services.
-- **Desktop front-end (`com.gmidi.ui`)** – A JavaFX scene graph that lists MIDI inputs, renders an 88-key piano, and mirrors incoming notes while the shared session persists the MIDI file.
-- **Interaction abstraction** – `RecordingInteraction` defines the lifecycle callbacks and (optionally) receiver decoration that a UI must provide so the core session can remain oblivious to presentation concerns.
+- Java 21 (the Gradle build uses the toolchain API to download it automatically when needed)
+- Gradle 8.6+ (only for regenerating the wrapper JAR if you do not already have it)
+- [FFmpeg](https://ffmpeg.org/) accessible on your `PATH` when recording video
 
-## Prerequisites
+## Project layout
 
-- Java 21 or newer
-- Gradle 8.6+ (only required the first time to regenerate the wrapper JAR)
-- The build pulls JavaFX modules directly from Maven Central and selects the right native artifacts for your OS when you run `./gradlew`
-
-## Bootstrapping the Gradle wrapper
-
-Binary assets such as `gradle-wrapper.jar` cannot be committed in this repository. Before using `./gradlew`, generate the wrapper JAR locally:
-
-```bash
-gradle wrapper
+```
+app/
+  build.gradle     # JavaFX + modular configuration
+  src/main/java    # Application sources
+  src/main/resources/com/gmidi/dark.css
 ```
 
-This downloads the wrapper artifacts into `gradle/wrapper/` so subsequent invocations of `./gradlew` work as expected.
+## Building & running
 
-## Running the console recorder
+1. (Optional) Generate the Gradle wrapper JAR if it is missing:
 
-Once the wrapper files exist, launch the CLI with:
+   ```bash
+   gradle wrapper
+   ```
 
-```bash
-./gradlew :app:run
-```
+2. Launch the JavaFX application via Gradle:
 
-The program lists available MIDI input devices, helps you pick one, and records until you press Enter again. Recordings default to timestamped filenames such as `recording-20241231-235945.mid` in the current directory.
+   ```bash
+   ./gradlew :app:run
+   ```
 
-If Gradle downloads are blocked entirely, you can run the application directly with the JDK.
-Because the project is modular and depends on JavaFX, point both compilation and execution at
-the JavaFX SDK that ships with OpenJFX (the Gradle build downloads it into your user cache on
-first use):
+   Gradle enables native access, configures the module path, and runs
+   `com.gmidi/com.gmidi.MainApp` directly.
 
-```bash
-PATH_TO_FX="$HOME/.gradle/caches/modules-2/files-2.1/org.openjfx" # adjust for your platform
-javac --module-path "$PATH_TO_FX" -d build/classes $(find app/src/main/java -name "*.java")
-java --module-path "build/classes:$PATH_TO_FX" --add-modules javafx.controls,javafx.graphics \
-  --enable-native-access=ALL-UNNAMED com.gmidi/com.gmidi.App
-```
+3. Alternatively, run with a locally installed JDK:
 
-## Launching the graphical recorder
+   ```bash
+   PATH_TO_FX="$HOME/.gradle/caches/modules-2/files-2.1/org.openjfx"
+   javac --module-path "$PATH_TO_FX" \
+         -d app/build/classes $(find app/src/main/java -name "*.java")
+   java --module-path "app/build/classes:$PATH_TO_FX" \
+        --add-modules javafx.controls,javafx.graphics \
+        --enable-native-access=ALL-UNNAMED \
+        --sun-misc-unsafe-memory-access=allow \
+        com.gmidi/com.gmidi.MainApp
+   ```
 
-The JavaFX interface shows a scrolling keyboard and flashes keys as you play. Run it with the `--gui` switch:
+## Using ffmpeg for video capture
 
-```bash
-./gradlew :app:run --args="--gui"
-```
+1. Install ffmpeg from your platform’s package manager or the [official builds](https://ffmpeg.org/download.html).
+2. Add the `ffmpeg` executable to your `PATH` (e.g. place `ffmpeg.exe` next to the GMIDI Recorder
+   executable on Windows or symlink it into `/usr/local/bin` on macOS/Linux).
+3. Inside GMIDI Recorder, enable **Record Video** after starting a MIDI capture. Frames are piped to
+   ffmpeg as PNG images and encoded to H.264 with the settings from the **Settings** dialog.
 
-You can place `--gui` anywhere in the argument list—the launcher scans all arguments and opens the
-desktop experience when it finds the flag.
+If ffmpeg cannot be located the UI will disable video capture and show an error in the status bar.
 
-Launch directly via the JDK (again pointing at the JavaFX SDK and enabling native access):
+## Recording workflow
 
-```bash
-PATH_TO_FX="$HOME/.gradle/caches/modules-2/files-2.1/org.openjfx"
-javac --module-path "$PATH_TO_FX" -d build/classes $(find app/src/main/java -name "*.java")
-java --module-path "build/classes:$PATH_TO_FX" --add-modules javafx.controls,javafx.graphics \
-  --enable-native-access=ALL-UNNAMED com.gmidi/com.gmidi.App --gui
-```
+1. Open the app and pick a MIDI input from the toolbar (use **Refresh** if you plug a controller in
+   while the app is running).
+2. Toggle **Record MIDI**. A timestamped `.mid` file is created under `recordings/` and all note
+   events, sustain pedal data, and tempo meta events are stored with microsecond timing.
+3. (Optional) Toggle **Record Video** to capture the key-fall canvas at the configured resolution and
+   FPS. The MP4 is written alongside the MIDI file.
+4. Watch the keyboard highlight keys in real time while the notes fall in the visualiser. Velocity
+   maps to brightness/opacity and sustain holds notes until the pedal is released.
+5. Stop recording. Files are saved as `yyyyMMdd-HHmmss.mid` / `.mp4` in the `recordings/` directory
+   (override the location via the Settings dialog).
 
-The Gradle tasks already pass `--enable-native-access=ALL-UNNAMED`, so the JavaFX runtime avoids
-the `sun.misc.Unsafe` warnings seen on newer JDKs.
+## UI highlights
 
-From the window you can:
+- Modern dark theme with rounded panels, accent toggles, and keyboard tooltips.
+- Key-fall visualiser renders at 60 FPS without per-frame allocations.
+- Sustain pedal support keeps note tails visible until the pedal is released.
+- Status bar tracks elapsed time, frames submitted to ffmpeg, and dropped frames.
+- Settings dialog lets you adjust video FPS, resolution, x264 preset, CRF, and the output folder.
 
-- Refresh and choose any available MIDI input device.
-- Pick a target `.mid` file via the platform file chooser (defaults to the timestamped suggestion).
-- Watch highlighted keys mirror the notes captured during the session.
+## Troubleshooting
 
-## Testing
+- **No MIDI devices listed:** Ensure your controller is connected and recognised by the OS, then
+  click **Refresh**. Some devices require installing vendor drivers on Windows.
+- **Video recording disabled:** Verify `ffmpeg --version` works in a terminal. The app pipes PNG
+  frames to ffmpeg; missing executables or incompatible builds will trigger an error message.
+- **Performance hiccups:** Close other applications that may compete for GPU resources. The visualiser
+  redraws via a single `Canvas` and uses a bounded queue to back-pressure ffmpeg when it falls behind.
 
-Most tests focus on deterministic utilities that do not require MIDI hardware. Execute them with:
+## License
 
-```bash
-./gradlew test
-```
-
-If Gradle cannot download dependencies in your environment, run `gradle test` with a locally installed Gradle distribution after regenerating the wrapper.
-
-## Roadmap
-
-- Add richer transport controls (metronome, configurable count-in, punch in/out) on top of the existing interaction contract.
-- Provide velocity-aware colouring and sustain-pedal overlays on the keyboard visualiser.
-- Record and surface session metadata to feed future playback and visualization features.
+GMIDI Recorder is released under the MIT License. See [LICENSE](LICENSE) for details.
