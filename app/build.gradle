@@ -31,10 +31,20 @@ java {
     modularity.inferModulePath = true
 }
 
+def prismVerboseEnabled = providers.gradleProperty('prismVerbose')
+        .map { it.toBoolean() }
+        .orElse(false)
+
 application {
     mainModule = 'com.gmidi'
     mainClass  = 'com.gmidi.MainApp'
-    applicationDefaultJvmArgs = ['-Dprism.allowhidpi=false']
+    applicationDefaultJvmArgs = prismVerboseEnabled.map { enabled ->
+        def args = ['-Dprism.allowhidpi=false']
+        if (enabled) {
+            args << '-Dprism.verbose=true'
+        }
+        return args
+    }.get()
 }
 
 tasks.withType(JavaExec).configureEach {

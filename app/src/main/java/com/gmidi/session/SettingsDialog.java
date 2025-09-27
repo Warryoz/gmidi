@@ -88,6 +88,10 @@ public class SettingsDialog extends Dialog<VideoSettings> {
         presetChoice.setValue(current.getPreset());
 
         TextField crfField = new TextField(Integer.toString(current.getCrf()));
+        TextField ffmpegField = new TextField(current.getFfmpegExecutable() == null
+                ? ""
+                : current.getFfmpegExecutable().toString());
+        ffmpegField.setPromptText("Optional: path to ffmpeg executable");
 
         grid.addRow(0, new Label("Recordings folder"), outputField, browse);
         GridPane.setHgrow(outputField, Priority.ALWAYS);
@@ -95,6 +99,7 @@ public class SettingsDialog extends Dialog<VideoSettings> {
         grid.addRow(2, new Label("Resolution"), resolutionChoice);
         grid.addRow(3, new Label("x264 preset"), presetChoice);
         grid.addRow(4, new Label("CRF"), crfField);
+        grid.addRow(5, new Label("FFmpeg path"), ffmpegField);
 
         getDialogPane().setContent(grid);
 
@@ -116,6 +121,16 @@ public class SettingsDialog extends Dialog<VideoSettings> {
             int[] wh = parseResolution(resolutionChoice.getValue(), current.getWidth(), current.getHeight());
             updated.setWidth(wh[0]);
             updated.setHeight(wh[1]);
+            String ffmpegText = ffmpegField.getText().trim();
+            if (ffmpegText.isEmpty()) {
+                updated.setFfmpegExecutable(null);
+            } else {
+                try {
+                    updated.setFfmpegExecutable(Paths.get(ffmpegText));
+                } catch (InvalidPathException ex) {
+                    updated.setFfmpegExecutable(current.getFfmpegExecutable());
+                }
+            }
             return updated;
         });
     }

@@ -15,6 +15,7 @@ public class VideoSettings {
     private int fps = 60;
     private int crf = 20;
     private String preset = "veryfast";
+    private Path ffmpegExecutable;
 
     public Path getOutputDirectory() {
         return outputDirectory;
@@ -62,5 +63,13 @@ public class VideoSettings {
 
     public void setPreset(String preset) {
         this.preset = preset;
+    }
+
+    public Path getFfmpegExecutable() {
+        return ffmpegExecutable;
+    }
+
+    public void setFfmpegExecutable(Path ffmpegExecutable) {
+        this.ffmpegExecutable = ffmpegExecutable;
     }
 }
