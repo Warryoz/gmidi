@@ -1,6 +1,5 @@
 plugins {
     id 'application'
-    id 'org.openjfx.javafxplugin' version '0.0.14'
 }
 
 repositories {
@@ -10,10 +9,24 @@ repositories {
 def javafxVersion = '21.0.2'
 def nativeAccessArg = '--enable-native-access=ALL-UNNAMED'
 
+def javafxPlatform = {
+    def os = org.gradle.internal.os.OperatingSystem.current()
+    if (os.isWindows()) {
+        return 'win'
+    }
+    if (os.isMacOsX()) {
+        return 'mac'
+    }
+    if (os.isLinux()) {
+        return 'linux'
+    }
+    throw new GradleException("Unsupported JavaFX platform: " + os)
+}.call()
+
 dependencies {
-    implementation "org.openjfx:javafx-controls:$javafxVersion"
-    implementation "org.openjfx:javafx-graphics:$javafxVersion"
-    implementation "org.openjfx:javafx-base:$javafxVersion"
+    implementation "org.openjfx:javafx-controls:$javafxVersion:$javafxPlatform"
+    implementation "org.openjfx:javafx-graphics:$javafxVersion:$javafxPlatform"
+    implementation "org.openjfx:javafx-base:$javafxVersion:$javafxPlatform"
     testImplementation libs.junit.jupiter
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
@@ -29,11 +42,6 @@ application {
     mainModule = 'com.gmidi'
     mainClass = 'com.gmidi.App'
     applicationDefaultJvmArgs = [nativeAccessArg]
-}
-
-javafx {
-    version = javafxVersion
-    modules = ['javafx.controls', 'javafx.graphics', 'javafx.base']
 }
 
 tasks.withType(JavaExec).configureEach {
