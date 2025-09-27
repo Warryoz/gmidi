@@ -4,22 +4,25 @@ plugins {
 
 repositories { mavenCentral() }
 
-def javafxVersion = '21.0.2'
+// ---- Versions & flags ----
+def javafxVersion   = '21.0.2'
 def nativeAccessArg = '--enable-native-access=ALL-UNNAMED'
+def allowUnsafeMem  = '--sun-misc-unsafe-memory-access=allow' // silences Unsafe warning on JDK 23+
 
-// if you only build on Windows you can hardcode 'win'
-def javafxPlatform = {
-    def os = org.gradle.internal.os.OperatingSystem.current()
-    if (os.isWindows()) return 'win'
-    if (os.isMacOsX())  return 'mac'       // use 'mac-aarch64' on Apple Silicon
-    if (os.isLinux())   return 'linux'     // use 'linux-aarch64' on ARM
-    throw new GradleException("Unsupported JavaFX platform: " + os)
-}.call()
+// ---- OS/arch → JavaFX classifier ----
+def os = org.gradle.internal.os.OperatingSystem.current()
+def arch = System.getProperty('os.arch')?.toLowerCase()
+def isAarch64 = arch?.contains('aarch64') || arch?.contains('arm64')
+def javafxPlatform =
+        os.isWindows() ? 'win' :
+                os.isMacOsX()  ? (isAarch64 ? 'mac-aarch64' : 'mac') :
+                        os.isLinux()   ? (isAarch64 ? 'linux-aarch64' : 'linux') :
+                                { throw new GradleException("Unsupported JavaFX platform: ${os} / arch=${arch}") }()
 
 dependencies {
-    implementation "org.openjfx:javafx-controls:${javafxVersion}:${javafxPlatform}"
-    implementation "org.openjfx:javafx-graphics:${javafxVersion}:${javafxPlatform}"
     implementation "org.openjfx:javafx-base:${javafxVersion}:${javafxPlatform}"
+    implementation "org.openjfx:javafx-graphics:${javafxVersion}:${javafxPlatform}"
+    implementation "org.openjfx:javafx-controls:${javafxVersion}:${javafxPlatform}"
 
     testImplementation libs.junit.jupiter
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
@@ -31,17 +34,37 @@ java {
 }
 
 application {
+    // Must match your module-info.java and Application class:
     mainModule = 'com.gmidi'
     mainClass  = 'com.gmidi.App'
-    applicationDefaultJvmArgs = [nativeAccessArg]
+    applicationDefaultJvmArgs = [nativeAccessArg, allowUnsafeMem]
 }
 
+// Make *every* JavaExec modular and pass the flags
 tasks.withType(JavaExec).configureEach {
     modularity.inferModulePath = true
-    jvmArgs nativeAccessArg
+    jvmArgs nativeAccessArg, allowUnsafeMem
 }
+
+// Force the Application 'run' task to launch via the module system
+tasks.named('run', JavaExec).configure {
+    // Convert Gradle's computed classpath into a module path and run with -m
+    doFirst {
+        // Put all runtime deps on the module path and clear the classpath
+        def mp = classpath.asPath
+        classpath = files()
+
+        // Tell the JVM to use modules explicitly
+        jvmArgs += [
+                '--module-path', mp,
+                '--add-modules', 'javafx.controls,javafx.graphics',
+                '-m', "${application.mainModule}/${application.mainClass}"
+        ]
+    }
+}
+
 tasks.withType(Test).configureEach {
     useJUnitPlatform()
     modularity.inferModulePath = true
-    jvmArgs nativeAccessArg
+    jvmArgs nativeAccessArg, allowUnsafeMem
 }
