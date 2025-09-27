@@ -1,5 +1,6 @@
 package com.gmidi.cli;
 
+import com.gmidi.cli.interaction.ConsoleRecordingInteraction;
 import com.gmidi.midi.MidiDeviceUtils;
 import com.gmidi.midi.MidiRecordingSession;
 import com.gmidi.midi.RecordingFileNamer;
@@ -7,6 +8,7 @@ import java.io.InputStream;
 import java.io.PrintStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.List;
 import java.util.Locale;
 import java.util.Scanner;
@@ -35,26 +37,17 @@ public final class MidiRecorderCli {
                 return 1;
             }
 
-            out.println("Available MIDI input devices:");
-            for (int i = 0; i < inputs.size(); i++) {
-                Info info = inputs.get(i);
-                out.printf("[%d] %s — %s (%s)%n", i, info.getName(), info.getDescription(), info.getVendor());
-            }
-            out.printf("Select a device [0-%d] (press Enter for 0):%n", inputs.size() - 1);
-            int selection = readDeviceSelection(scanner, inputs.size());
-            MidiDevice.Info selectedDevice = inputs.get(selection);
-            out.printf("Selected '%s'.%n", selectedDevice.getName());
-
-            String defaultFileName = RecordingFileNamer.defaultFileName();
-            out.printf("Enter output file path (press Enter for %s):%n", defaultFileName);
-            Path outputPath = resolveOutputPath(scanner, defaultFileName);
+            printDeviceList(inputs);
+            MidiDevice.Info selectedDevice = selectDevice(scanner, inputs);
+            Path outputPath = requestOutputPath(scanner);
             if (outputPath == null) {
                 out.println("Recording cancelled.");
                 return 1;
             }
 
-            MidiRecordingSession session = new MidiRecordingSession(out);
-            session.record(selectedDevice, outputPath, scanner);
+            MidiRecordingSession session = new MidiRecordingSession();
+            ConsoleRecordingInteraction interaction = new ConsoleRecordingInteraction(out, scanner);
+            session.record(selectedDevice, outputPath, interaction);
             return 0;
         } catch (MidiUnavailableException ex) {
             out.printf("Failed to access MIDI device: %s%n", ex.getMessage());
@@ -63,6 +56,22 @@ public final class MidiRecorderCli {
             out.printf("Unexpected error: %s%n", ex.getMessage());
             return 2;
         }
+    }
+
+    private void printDeviceList(List<MidiDevice.Info> inputs) {
+        out.println("Available MIDI input devices:");
+        for (int i = 0; i < inputs.size(); i++) {
+            Info info = inputs.get(i);
+            out.printf("[%d] %s — %s (%s)%n", i, info.getName(), info.getDescription(), info.getVendor());
+        }
+    }
+
+    private MidiDevice.Info selectDevice(Scanner scanner, List<MidiDevice.Info> inputs) {
+        out.printf("Select a device [0-%d] (press Enter for 0):%n", inputs.size() - 1);
+        int selection = readDeviceSelection(scanner, inputs.size());
+        MidiDevice.Info selectedDevice = inputs.get(selection);
+        out.printf("Selected '%s'.%n", selectedDevice.getName());
+        return selectedDevice;
     }
 
     private int readDeviceSelection(Scanner scanner, int deviceCount) {
@@ -83,10 +92,12 @@ public final class MidiRecorderCli {
         }
     }
 
-    private Path resolveOutputPath(Scanner scanner, String defaultFileName) {
+    private Path requestOutputPath(Scanner scanner) {
+        String defaultFileName = RecordingFileNamer.defaultFileName();
+        out.printf("Enter output file path (press Enter for %s):%n", defaultFileName);
         while (true) {
             String line = scanner.nextLine().trim();
-            Path path = line.isEmpty() ? Path.of(defaultFileName) : Path.of(line);
+            Path path = line.isEmpty() ? Paths.get(defaultFileName) : Paths.get(line);
             try {
                 Path absolute = path.toAbsolutePath();
                 Path parent = absolute.getParent();
