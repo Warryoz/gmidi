@@ -1,10 +1,7 @@
 package com.gmidi.ui;
 
 import javafx.beans.InvalidationListener;
-import javafx.beans.value.ChangeListener;
-import javafx.beans.value.ObservableValue;
 import javafx.geometry.Bounds;
-import javafx.scene.Scene;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
 import javafx.scene.layout.Region;
@@ -40,10 +37,7 @@ public class KeyFallCanvas extends Canvas {
     @SuppressWarnings("unchecked")
     private final Deque<NoteSprite>[] activePerNote = new Deque[128];
 
-    private final ChangeListener<Number> widthListener = (obs, oldV, newV) -> updateSizeFromViewport();
-    private final ChangeListener<Number> heightListener = (obs, oldV, newV) -> updateSizeFromViewport();
-    private final InvalidationListener layoutListener = obs -> updateSizeFromViewport();
-    private ChangeListener<Scene> viewportSceneListener;
+    private final InvalidationListener viewportBoundsListener = obs -> applyViewportBounds();
 
     private Region boundViewport;
     private boolean sustainPedal;
@@ -53,6 +47,7 @@ public class KeyFallCanvas extends Canvas {
     public KeyFallCanvas() {
         super(1, 1);
         setFocusTraversable(false);
+        setMouseTransparent(true);
         for (int i = 0; i < activePerNote.length; i++) {
             activePerNote[i] = new ArrayDeque<>();
         }
@@ -67,82 +62,37 @@ public class KeyFallCanvas extends Canvas {
     public void bindTo(Region viewport) {
         Objects.requireNonNull(viewport, "viewport");
         if (viewport == boundViewport) {
-            updateSizeFromViewport();
+            applyViewportBounds();
             return;
         }
-        removeViewportListeners();
+        unbindViewport();
         boundViewport = viewport;
-        if (viewport.getScene() == null) {
-            viewportSceneListener = new ChangeListener<>() {
-                @Override
-                public void changed(ObservableValue<? extends Scene> obs, Scene oldScene, Scene newScene) {
-                    if (newScene != null) {
-                        viewport.sceneProperty().removeListener(this);
-                        viewportSceneListener = null;
-                        installViewportListeners();
-                        updateSizeFromViewport();
-                    }
-                }
-            };
-            viewport.sceneProperty().addListener(viewportSceneListener);
-        } else {
-            installViewportListeners();
-        }
-        updateSizeFromViewport();
+        boundViewport.layoutBoundsProperty().addListener(viewportBoundsListener);
+        applyViewportBounds();
     }
 
-    private void updateSizeFromViewport() {
-        if (boundViewport == null) {
-            return;
-        }
-        double width = clampDimension(boundViewport.getWidth());
-        double height = clampDimension(boundViewport.getHeight());
-        Bounds bounds = boundViewport.getLayoutBounds();
-        if (width <= 1.0 && bounds != null) {
-            width = Math.max(width, clampDimension(bounds.getWidth()));
-        }
-        if (height <= 1.0 && bounds != null) {
-            height = Math.max(height, clampDimension(bounds.getHeight()));
-        }
-        if (width <= 1.0) {
-            width = 1.0;
-        }
-        if (height <= 1.0) {
-            height = 1.0;
-        }
-        boolean changed = false;
-        if (width != getWidth()) {
-            setWidth(width);
-            changed = true;
-        }
-        if (height != getHeight()) {
-            setHeight(height);
-            changed = true;
-        }
-        if (changed) {
-            renderLastFrame();
-        }
-    }
-
-    private void removeViewportListeners() {
+    public void unbindViewport() {
         if (boundViewport != null) {
-            boundViewport.widthProperty().removeListener(widthListener);
-            boundViewport.heightProperty().removeListener(heightListener);
-            boundViewport.layoutBoundsProperty().removeListener(layoutListener);
-            if (viewportSceneListener != null) {
-                boundViewport.sceneProperty().removeListener(viewportSceneListener);
-            }
+            boundViewport.layoutBoundsProperty().removeListener(viewportBoundsListener);
+            boundViewport = null;
         }
-        viewportSceneListener = null;
     }
 
-    private void installViewportListeners() {
+    private void applyViewportBounds() {
         if (boundViewport == null) {
             return;
         }
-        boundViewport.widthProperty().addListener(widthListener);
-        boundViewport.heightProperty().addListener(heightListener);
-        boundViewport.layoutBoundsProperty().addListener(layoutListener);
+        // Only observe layoutBoundsProperty to avoid resize feedback loops between the canvas
+        // and its parent region. Clamp to a minimum size so the renderer always has a surface.
+        Bounds bounds = boundViewport.getLayoutBounds();
+        if (bounds == null) {
+            return;
+        }
+        double width = clampDimension(bounds.getWidth());
+        double height = clampDimension(bounds.getHeight());
+        setWidth(width);
+        setHeight(height);
+        drawLastFrame();
     }
 
     private double clampDimension(double value) {
@@ -162,7 +112,7 @@ public class KeyFallCanvas extends Canvas {
         }
         if (this.windowSeconds != seconds) {
             this.windowSeconds = seconds;
-            renderLastFrame();
+            drawLastFrame();
         }
     }
 
@@ -240,7 +190,7 @@ public class KeyFallCanvas extends Canvas {
         for (Deque<NoteSprite> stack : activePerNote) {
             stack.clear();
         }
-        renderLastFrame();
+        drawLastFrame();
     }
 
     /**
@@ -252,31 +202,35 @@ public class KeyFallCanvas extends Canvas {
             nowNanos = System.nanoTime();
         }
         lastTickNanos = nowNanos;
-        render(nowNanos);
+        draw(nowNanos);
     }
 
-    private void renderLastFrame() {
+    private void drawLastFrame() {
         if (lastTickNanos == 0) {
             lastTickNanos = System.nanoTime();
         }
-        render(lastTickNanos);
+        draw(lastTickNanos);
     }
 
-    private void render(long nowNanos) {
+    private void draw(long nowNanos) {
         double width = Math.max(1.0, getWidth());
         double height = Math.max(1.0, getHeight());
         GraphicsContext gc = getGraphicsContext2D();
+        gc.clearRect(0, 0, width, height);
         gc.setFill(BACKGROUND);
         gc.fillRect(0, 0, width, height);
 
-        double windowNanos = windowSeconds * NANOS_PER_SECOND;
-        double nanosPerPixel = windowNanos / height;
-        if (nanosPerPixel <= 0) {
-            nanosPerPixel = 1.0;
+        long windowNanos = (long) (windowSeconds * NANOS_PER_SECOND);
+        if (windowNanos <= 0) {
+            windowNanos = (long) (MIN_WINDOW_SECONDS * NANOS_PER_SECOND);
         }
         long viewEnd = nowNanos;
-        long viewStart = viewEnd - (long) windowNanos;
+        long viewStart = viewEnd - windowNanos;
         long fadeCutoff = viewStart - (long) (FADE_SECONDS * NANOS_PER_SECOND);
+        double pixelsPerNano = height / (double) windowNanos;
+        if (!Double.isFinite(pixelsPerNano) || pixelsPerNano <= 0) {
+            pixelsPerNano = 1.0 / NANOS_PER_SECOND;
+        }
 
         Iterator<NoteSprite> iterator = sprites.iterator();
         while (iterator.hasNext()) {
@@ -291,16 +245,28 @@ public class KeyFallCanvas extends Canvas {
                 continue;
             }
 
-            double bottom = (viewEnd - sprite.onTimeNanos) / nanosPerPixel;
-            if (bottom < -NOTE_MARGIN) {
+            long visibleEnd = Math.min(releaseTime, viewEnd);
+            long visibleStart = Math.max(sprite.onTimeNanos, viewStart);
+            if (visibleEnd < viewStart) {
+                recycle(iterator, sprite);
                 continue;
             }
 
-            double durationNanos = Math.max(0, releaseTime - sprite.onTimeNanos);
-            double noteHeight = Math.max(MIN_NOTE_HEIGHT, durationNanos / nanosPerPixel);
-            double top = bottom - noteHeight;
-            if (top > height + NOTE_MARGIN) {
+            double bottom = height - ((viewEnd - visibleEnd) * pixelsPerNano);
+            double top = height - ((viewEnd - visibleStart) * pixelsPerNano);
+            double noteHeight = bottom - top;
+            if (!Double.isFinite(noteHeight)) {
+                continue;
+            }
+            if (noteHeight < MIN_NOTE_HEIGHT) {
+                noteHeight = MIN_NOTE_HEIGHT;
+                top = bottom - noteHeight;
+            }
+            if (bottom < -NOTE_MARGIN) {
                 recycle(iterator, sprite);
+                continue;
+            }
+            if (top > height + NOTE_MARGIN) {
                 continue;
             }
 

@@ -37,11 +37,18 @@ public class MainApp extends Application {
         midiService = new MidiService();
 
         KeyboardView keyboardView = new KeyboardView();
+        keyboardView.setMaxWidth(Double.MAX_VALUE);
+
         KeyFallCanvas keyFallCanvas = new KeyFallCanvas();
-        StackPane keyFallContainer = new StackPane(keyFallCanvas);
-        keyFallContainer.getStyleClass().add("keyfall-container");
-        keyFallContainer.setPadding(new Insets(12, 16, 16, 16));
-        keyFallCanvas.bindTo(keyFallContainer);
+        StackPane keyFallViewport = new StackPane();
+        keyFallViewport.getStyleClass().add("keyfall-container");
+        keyFallViewport.setPadding(new Insets(12, 16, 16, 16));
+        keyFallViewport.getChildren().add(keyFallCanvas); // child 0: canvas
+        StackPane overlayLayer = new StackPane();
+        overlayLayer.setMouseTransparent(true);
+        overlayLayer.setPickOnBounds(false);
+        keyFallViewport.getChildren().add(overlayLayer); // child 1: overlays placeholder
+        keyFallCanvas.bindTo(keyFallViewport);
 
         ComboBox<MidiService.MidiInput> deviceCombo = getMidiInputComboBox();
 
@@ -72,11 +79,11 @@ public class MainApp extends Application {
         toolbar.setPadding(new Insets(16, 18, 12, 18));
         toolbar.getStyleClass().add("toolbar");
 
-        VBox visualiser = new VBox(12, keyboardView, keyFallContainer);
-        visualiser.setPadding(new Insets(0, 0, 0, 0));
-        VBox.setVgrow(keyFallContainer, Priority.ALWAYS);
-        keyboardView.setMaxWidth(Double.MAX_VALUE);
-        keyFallContainer.setMaxWidth(Double.MAX_VALUE);
+        BorderPane visualiserPane = new BorderPane();
+        visualiserPane.setCenter(keyFallViewport);
+        BorderPane.setMargin(keyFallViewport, Insets.EMPTY);
+        visualiserPane.setBottom(keyboardView);
+        BorderPane.setMargin(keyboardView, new Insets(0, 16, 16, 16));
 
         ProgressBar progressBar = new ProgressBar(0);
         progressBar.setPrefWidth(Double.MAX_VALUE);
@@ -102,7 +109,7 @@ public class MainApp extends Application {
 
         BorderPane root = new BorderPane();
         root.setTop(toolbar);
-        root.setCenter(visualiser);
+        root.setCenter(visualiserPane);
         root.setBottom(bottom);
         root.getStyleClass().add("app-root");
 
@@ -123,7 +130,7 @@ public class MainApp extends Application {
                 midiService,
                 keyboardView,
                 keyFallCanvas,
-                visualiser,
+                visualiserPane,
                 deviceCombo,
                 midiRecordToggle,
                 videoRecordToggle,
@@ -145,6 +152,7 @@ public class MainApp extends Application {
         stage.setMinWidth(960);
         stage.setMinHeight(640);
         stage.show();
+        controller.startAnimation();
     }
 
     private static ComboBox<MidiService.MidiInput> getMidiInputComboBox() {
