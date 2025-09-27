@@ -304,10 +304,19 @@ public class SessionController {
         }
         SnapshotParameters params = new SnapshotParameters();
         params.setFill(Color.rgb(18, 18, 18));
-        double scaleX = videoSettings.getWidth() / width;
-        double scaleY = videoSettings.getHeight() / height;
-        params.setTransform(Transform.scale(scaleX, scaleY));
-        WritableImage frame = new WritableImage(videoSettings.getWidth(), videoSettings.getHeight());
+        double scaleLimit = Math.min(
+                1.0,
+                Math.min(videoSettings.getWidth() / width, videoSettings.getHeight() / height)
+        );
+        if (scaleLimit <= 0) {
+            scaleLimit = 1.0;
+        }
+        if (scaleLimit != 1.0) {
+            params.setTransform(Transform.scale(scaleLimit, scaleLimit));
+        }
+        int frameWidth = Math.max(1, (int) Math.round(width * scaleLimit));
+        int frameHeight = Math.max(1, (int) Math.round(height * scaleLimit));
+        WritableImage frame = new WritableImage(frameWidth, frameHeight);
         WritableImage snapshot = captureNode.snapshot(params, frame);
         boolean accepted = videoRecorder.writeFrame(snapshot);
         if (!accepted) {
