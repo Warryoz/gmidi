@@ -1,8 +1,6 @@
 package com.gmidi;
 
 import com.gmidi.cli.MidiRecorderCli;
-import java.io.InputStream;
-import java.io.PrintStream;
 
 /**
  * Entry point for the GMIDI command line tools.
@@ -14,14 +12,14 @@ public final class App {
     }
 
     public static void main(String[] args) {
-        int exitCode = run(System.in, System.out);
+        int exitCode = run();
         if (exitCode != 0) {
             System.exit(exitCode);
         }
     }
 
-    static int run(InputStream in, PrintStream out) {
-        MidiRecorderCli cli = new MidiRecorderCli(in, out);
+    static int run() {
+        MidiRecorderCli cli = new MidiRecorderCli(System.in, System.out);
         return cli.run();
     }
 }
