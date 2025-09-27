@@ -43,23 +43,7 @@ public class MainApp extends Application {
         keyFallContainer.setPadding(new Insets(12, 16, 16, 16));
         keyFallCanvas.bindTo(keyFallContainer);
 
-        ComboBox<MidiService.MidiInput> deviceCombo = new ComboBox<>();
-        deviceCombo.setPromptText("MIDI input");
-        deviceCombo.setPrefWidth(240);
-        deviceCombo.setCellFactory(list -> new javafx.scene.control.ListCell<>() {
-            @Override
-            protected void updateItem(MidiService.MidiInput item, boolean empty) {
-                super.updateItem(item, empty);
-                setText(empty || item == null ? null : item.name());
-            }
-        });
-        deviceCombo.setButtonCell(new javafx.scene.control.ListCell<>() {
-            @Override
-            protected void updateItem(MidiService.MidiInput item, boolean empty) {
-                super.updateItem(item, empty);
-                setText(empty || item == null ? "MIDI input" : item.name());
-            }
-        });
+        ComboBox<MidiService.MidiInput> deviceCombo = getMidiInputComboBox();
 
         Button refreshButton = new Button("Refresh");
         refreshButton.getStyleClass().add("accent-button");
@@ -161,6 +145,27 @@ public class MainApp extends Application {
         stage.setMinWidth(960);
         stage.setMinHeight(640);
         stage.show();
+    }
+
+    private static ComboBox<MidiService.MidiInput> getMidiInputComboBox() {
+        ComboBox<MidiService.MidiInput> deviceCombo = new ComboBox<>();
+        deviceCombo.setPromptText("MIDI input");
+        deviceCombo.setPrefWidth(240);
+        deviceCombo.setCellFactory(list -> new javafx.scene.control.ListCell<>() {
+            @Override
+            protected void updateItem(MidiService.MidiInput item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item.name());
+            }
+        });
+        deviceCombo.setButtonCell(new javafx.scene.control.ListCell<>() {
+            @Override
+            protected void updateItem(MidiService.MidiInput item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? "MIDI input" : item.name());
+            }
+        });
+        return deviceCombo;
     }
 
     @Override
