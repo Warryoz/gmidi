@@ -1,19 +1,82 @@
 plugins {
     id 'application'
-    id 'org.openjfx.javafxplugin' version '0.0.14'
 }
 
 repositories {
     mavenCentral()
 }
 
-def javafxVersion = '21.0.2'
 def nativeAccessArg = '--enable-native-access=ALL-UNNAMED'
 
+class JavaFxConfiguration {
+    String version
+    List<String> modules = []
+
+    void modules(String... moduleNames) {
+        setModules(moduleNames.toList())
+    }
+
+    void setModules(Iterable<?> moduleNames) {
+        this.modules = moduleNames.collect { it.toString() }
+    }
+
+    void setVersion(Object version) {
+        this.version = version.toString()
+    }
+}
+
+def defaultJavafxVersion = (findProperty('javafxVersion') ?: '21.0.2').toString()
+def javafxConfig = new JavaFxConfiguration(
+    version: defaultJavafxVersion,
+    modules: ['javafx.controls', 'javafx.graphics', 'javafx.base']
+)
+
+def javafx(Closure<?> configureClosure) {
+    configureClosure.delegate = javafxConfig
+    configureClosure.resolveStrategy = Closure.DELEGATE_FIRST
+    configureClosure.call()
+}
+
+def javafxPlatform = {
+    def override = findProperty('javafxPlatform')
+    if (override) {
+        return override.toString()
+    }
+
+    def os = org.gradle.internal.os.OperatingSystem.current()
+    def arch = System.getProperty('os.arch').toLowerCase(java.util.Locale.ROOT)
+
+    if (os.isWindows()) {
+        return arch.contains('64') ? 'win' : 'win-x86'
+    }
+    if (os.isMacOsX()) {
+        if (arch.contains('aarch64') || arch.contains('arm64')) {
+            return 'mac-aarch64'
+        }
+        return 'mac'
+    }
+    if (os.isLinux()) {
+        if (arch.contains('aarch64') || arch.contains('arm64')) {
+            return 'linux-aarch64'
+        }
+        if (arch.contains('arm')) {
+            return 'linux-arm32'
+        }
+        return 'linux'
+    }
+    throw new GradleException("Unsupported JavaFX platform: ${os} (${arch})")
+}.call()
+
+javafx {
+    version = defaultJavafxVersion
+    modules = ['javafx.controls', 'javafx.graphics', 'javafx.base']
+}
+
 dependencies {
-    implementation "org.openjfx:javafx-controls:$javafxVersion"
-    implementation "org.openjfx:javafx-graphics:$javafxVersion"
-    implementation "org.openjfx:javafx-base:$javafxVersion"
+    javafxConfig.modules.unique().each { moduleName ->
+        def artifactName = moduleName.replace('.', '-')
+        implementation "org.openjfx:${artifactName}:${javafxConfig.version}:${javafxPlatform}"
+    }
     testImplementation libs.junit.jupiter
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
@@ -29,11 +92,6 @@ application {
     mainModule = 'com.gmidi'
     mainClass = 'com.gmidi.App'
     applicationDefaultJvmArgs = [nativeAccessArg]
-}
-
-javafx {
-    version = javafxVersion
-    modules = ['javafx.controls', 'javafx.graphics', 'javafx.base']
 }
 
 tasks.withType(JavaExec).configureEach {
