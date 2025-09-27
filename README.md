@@ -13,7 +13,7 @@ GMIDI is a Java 21 toolkit for capturing MIDI performances that will evolve into
 
 - Java 21 or newer
 - Gradle 8.6+ (only required the first time to regenerate the wrapper JAR)
-- The build pulls JavaFX modules via the OpenJFX Gradle plugin when you run `./gradlew`
+- The build pulls JavaFX modules directly from Maven Central and selects the right native artifacts for your OS when you run `./gradlew`
 
 ## Bootstrapping the Gradle wrapper
 

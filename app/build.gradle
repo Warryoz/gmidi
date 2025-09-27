@@ -1,20 +1,28 @@
+import org.gradle.internal.os.OperatingSystem
+
 plugins {
     id 'application'
-    id 'org.openjfx.javafxplugin' version '0.0.14'
 }
 
 repositories {
     mavenCentral()
 }
 
+def javafxVersion = '21.0.2'
+def os = OperatingSystem.current()
+def platformClassifier = os.isWindows() ? 'win' : (os.isMacOsX() ? 'mac' : 'linux')
+
 dependencies {
+    implementation "org.openjfx:javafx-controls:${javafxVersion}"
+    implementation "org.openjfx:javafx-graphics:${javafxVersion}"
+    implementation "org.openjfx:javafx-base:${javafxVersion}"
+
+    runtimeOnly "org.openjfx:javafx-controls:${javafxVersion}:${platformClassifier}"
+    runtimeOnly "org.openjfx:javafx-graphics:${javafxVersion}:${platformClassifier}"
+    runtimeOnly "org.openjfx:javafx-base:${javafxVersion}:${platformClassifier}"
+
     testImplementation libs.junit.jupiter
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
-}
-
-javafx {
-    version = '21.0.2'
-    modules = ['javafx.controls']
 }
 
 java {
