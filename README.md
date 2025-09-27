@@ -26,10 +26,10 @@ app/
    gradle wrapper
    ```
 
-2. Launch the JavaFX application via Gradle:
+2. Launch the JavaFX application via Gradle (configuration cache friendly):
 
    ```bash
-   ./gradlew :app:run
+   ./gradlew --configuration-cache :app:run
    ```
 
    Gradle enables native access, configures the module path, and runs
@@ -70,6 +70,20 @@ If ffmpeg cannot be located the UI will disable video capture and show an error 
    maps to brightness/opacity and sustain holds notes until the pedal is released.
 5. Stop recording. Files are saved as `yyyyMMdd-HHmmss.mid` / `.mp4` in the `recordings/` directory
    (override the location via the Settings dialog).
+
+## Rendering notes
+
+- The key-fall canvas binds itself to the visible viewport and clamps both dimensions to at least a
+  single pixel. JavaFX therefore never needs to allocate giant backing textures, which eliminates
+  the `NGCanvas`/`RTTexture` validation crashes on HiDPI displays.
+- Only the most recent time window (8 seconds by default) is drawn. Notes outside the viewport are
+  recycled immediately after they fade, so the number of active sprites stays bounded even during
+  long sessions.
+- Video recording snapshots only the keyboard + canvas container. Frames are captured at the native
+  UI resolution or down-scaled to the configured video size—never upscaled—keeping capture work
+  predictable and cheap.
+- Need low-level Prism diagnostics? Run `./gradlew :app:run -Dprism.verbose=true` or add the flag to
+  `applicationDefaultJvmArgs` temporarily.
 
 ## UI highlights
 

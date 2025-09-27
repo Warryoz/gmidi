@@ -41,18 +41,7 @@ public class MainApp extends Application {
         StackPane keyFallContainer = new StackPane(keyFallCanvas);
         keyFallContainer.getStyleClass().add("keyfall-container");
         keyFallContainer.setPadding(new Insets(12, 16, 16, 16));
-        keyFallContainer.widthProperty().addListener((obs, oldV, newV) -> {
-            double width = newV.doubleValue();
-            if (width > 0) {
-                keyFallCanvas.setWidth(width);
-            }
-        });
-        keyFallContainer.heightProperty().addListener((obs, oldV, newV) -> {
-            double height = newV.doubleValue();
-            if (height > 0) {
-                keyFallCanvas.setHeight(height);
-            }
-        });
+        keyFallCanvas.bindTo(keyFallContainer);
 
         ComboBox<MidiService.MidiInput> deviceCombo = new ComboBox<>();
         deviceCombo.setPromptText("MIDI input");
@@ -99,8 +88,8 @@ public class MainApp extends Application {
         toolbar.setPadding(new Insets(16, 18, 12, 18));
         toolbar.getStyleClass().add("toolbar");
 
-        VBox center = new VBox(12, keyboardView, keyFallContainer);
-        center.setPadding(new Insets(0, 0, 0, 0));
+        VBox visualiser = new VBox(12, keyboardView, keyFallContainer);
+        visualiser.setPadding(new Insets(0, 0, 0, 0));
         VBox.setVgrow(keyFallContainer, Priority.ALWAYS);
         keyboardView.setMaxWidth(Double.MAX_VALUE);
         keyFallContainer.setMaxWidth(Double.MAX_VALUE);
@@ -129,7 +118,7 @@ public class MainApp extends Application {
 
         BorderPane root = new BorderPane();
         root.setTop(toolbar);
-        root.setCenter(center);
+        root.setCenter(visualiser);
         root.setBottom(bottom);
         root.getStyleClass().add("app-root");
 
@@ -150,7 +139,7 @@ public class MainApp extends Application {
                 midiService,
                 keyboardView,
                 keyFallCanvas,
-                keyFallContainer,
+                visualiser,
                 deviceCombo,
                 midiRecordToggle,
                 videoRecordToggle,

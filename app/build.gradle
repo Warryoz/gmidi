@@ -6,12 +6,7 @@ repositories {
     mavenCentral()
 }
 
-/* ------------ Versions ------------ */
-def javafxVersion = '21.0.2'     // Match your JDK 21
-def nativeAccessArg = '--enable-native-access=ALL-UNNAMED'
-// If you ever run on JDK 23+, you MAY also need this flag to silence Unsafe warnings.
-// Do NOT pass it on JDK 21 or it will fail as "Unrecognized VM option".
-// def allowUnsafeMem = '--sun-misc-unsafe-memory-access=allow'
+def javafxVersion = '21.0.2'
 
 /* ---- OS/arch → JavaFX classifier ---- */
 def os = org.gradle.internal.os.OperatingSystem.current()
@@ -24,43 +19,30 @@ def javafxPlatform =
                                 { throw new GradleException("Unsupported JavaFX platform: ${os} / arch=${arch}") }()
 
 dependencies {
-    // JavaFX modules (add others if you use them)
     implementation "org.openjfx:javafx-base:${javafxVersion}:${javafxPlatform}"
     implementation "org.openjfx:javafx-graphics:${javafxVersion}:${javafxPlatform}"
     implementation "org.openjfx:javafx-controls:${javafxVersion}:${javafxPlatform}"
-    // If you use Media or FXML, uncomment:
-    // implementation "org.openjfx:javafx-media:${javafxVersion}:${javafxPlatform}"
-    // implementation "org.openjfx:javafx-fxml:${javafxVersion}:${javafxPlatform}"
-
-    // Keep your existing JUnit platform/catalog if you have one:
     testImplementation libs.junit.jupiter
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
 java {
     toolchain { languageVersion = JavaLanguageVersion.of(21) }
-    // Tell Gradle to put runtime deps on the module-path for JavaExec/Test
     modularity.inferModulePath = true
 }
 
 application {
-    // Modular run: java -p <deps> -m com.gmidi/com.gmidi.MainApp
     mainModule = 'com.gmidi'
     mainClass  = 'com.gmidi.MainApp'
-    // Only include flags that exist for your JDK:
-    applicationDefaultJvmArgs = [nativeAccessArg] // add allowUnsafeMem here ONLY if on JDK 23+
+    applicationDefaultJvmArgs = ['-Dprism.allowhidpi=false']
 }
 
-/* --- Make all JavaExec/Test tasks modular (no doFirst hacks) --- */
 tasks.withType(JavaExec).configureEach {
     modularity.inferModulePath = true
-    // If you know you'll run on JDK 23+, you could conditionally add allowUnsafeMem
-    // jvmArgs nativeAccessArg, allowUnsafeMem
 }
 
 tasks.withType(Test).configureEach {
     useJUnitPlatform()
     modularity.inferModulePath = true
-    // If tests touch JavaFX, this ensures modules are initialized:
     jvmArgs '--add-modules', 'javafx.controls,javafx.graphics'
 }
