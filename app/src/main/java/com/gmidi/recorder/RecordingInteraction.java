@@ -26,4 +26,14 @@ public interface RecordingInteraction {
 
     /** Called once the recording has been persisted to disk. */
     void onRecordingFinished(Path outputPath);
+
+    /**
+     * Allows UI layers to wrap the MIDI receiver so they can observe incoming
+     * events (for example to visualize pressed keys). Implementations that do
+     * not need to intercept events can simply rely on the default behaviour.
+     */
+    default javax.sound.midi.Receiver decorateReceiver(javax.sound.midi.Receiver downstream) {
+        return downstream;
+    }
+
 }

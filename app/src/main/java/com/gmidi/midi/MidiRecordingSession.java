@@ -40,7 +40,7 @@ public final class MidiRecordingSession {
             sequencer.recordEnable(track, -1);
 
             try (Transmitter transmitter = device.getTransmitter();
-                 Receiver receiver = sequencer.getReceiver()) {
+                 Receiver receiver = interaction.decorateReceiver(sequencer.getReceiver())) {
                 transmitter.setReceiver(receiver);
 
                 interaction.onReadyToRecord();

@@ -42,6 +42,12 @@ public final class MidiRecorderCli {
             MidiDevice.Info selectedDevice = selectDevice(scanner, inputs);
             Path outputPath = requestOutputPath(scanner);
 
+            if (outputPath == null) {
+                out.println("Recording cancelled.");
+                return 1;
+            }
+
+
             MidiRecordingSession session = new MidiRecordingSession();
             ConsoleRecordingInteraction interaction = new ConsoleRecordingInteraction(out, scanner);
             session.record(selectedDevice, outputPath, interaction);
