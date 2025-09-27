@@ -1,6 +1,10 @@
 package com.gmidi.ui;
 
+import javafx.beans.InvalidationListener;
 import javafx.beans.value.ChangeListener;
+import javafx.beans.value.ObservableValue;
+import javafx.geometry.Bounds;
+import javafx.scene.Scene;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
 import javafx.scene.layout.Region;
@@ -28,6 +32,7 @@ public class KeyFallCanvas extends Canvas {
     private static final double MIN_NOTE_HEIGHT = 6.0;
     private static final double NOTE_MARGIN = 32.0;
     private static final Color BACKGROUND = Color.web("#101010");
+    private static final double MAX_DIMENSION = 8192.0;
     private static final Color NOTE_COLOR = Color.web("#2CE4D0");
 
     private final List<NoteSprite> sprites = new ArrayList<>();
@@ -37,6 +42,8 @@ public class KeyFallCanvas extends Canvas {
 
     private final ChangeListener<Number> widthListener = (obs, oldV, newV) -> updateSizeFromViewport();
     private final ChangeListener<Number> heightListener = (obs, oldV, newV) -> updateSizeFromViewport();
+    private final InvalidationListener layoutListener = obs -> updateSizeFromViewport();
+    private ChangeListener<Scene> viewportSceneListener;
 
     private Region boundViewport;
     private boolean sustainPedal;
@@ -49,8 +56,6 @@ public class KeyFallCanvas extends Canvas {
         for (int i = 0; i < activePerNote.length; i++) {
             activePerNote[i] = new ArrayDeque<>();
         }
-        widthProperty().addListener((obs, oldV, newV) -> renderLastFrame());
-        heightProperty().addListener((obs, oldV, newV) -> renderLastFrame());
     }
 
     /**
@@ -61,13 +66,28 @@ public class KeyFallCanvas extends Canvas {
      */
     public void bindTo(Region viewport) {
         Objects.requireNonNull(viewport, "viewport");
-        if (boundViewport != null) {
-            boundViewport.widthProperty().removeListener(widthListener);
-            boundViewport.heightProperty().removeListener(heightListener);
+        if (viewport == boundViewport) {
+            updateSizeFromViewport();
+            return;
         }
+        removeViewportListeners();
         boundViewport = viewport;
-        boundViewport.widthProperty().addListener(widthListener);
-        boundViewport.heightProperty().addListener(heightListener);
+        if (viewport.getScene() == null) {
+            viewportSceneListener = new ChangeListener<>() {
+                @Override
+                public void changed(ObservableValue<? extends Scene> obs, Scene oldScene, Scene newScene) {
+                    if (newScene != null) {
+                        viewport.sceneProperty().removeListener(this);
+                        viewportSceneListener = null;
+                        installViewportListeners();
+                        updateSizeFromViewport();
+                    }
+                }
+            };
+            viewport.sceneProperty().addListener(viewportSceneListener);
+        } else {
+            installViewportListeners();
+        }
         updateSizeFromViewport();
     }
 
@@ -75,17 +95,61 @@ public class KeyFallCanvas extends Canvas {
         if (boundViewport == null) {
             return;
         }
-        double width = Math.max(1.0, boundViewport.getWidth());
-        double height = Math.max(1.0, boundViewport.getHeight());
+        double width = clampDimension(boundViewport.getWidth());
+        double height = clampDimension(boundViewport.getHeight());
+        Bounds bounds = boundViewport.getLayoutBounds();
+        if (width <= 1.0 && bounds != null) {
+            width = Math.max(width, clampDimension(bounds.getWidth()));
+        }
+        if (height <= 1.0 && bounds != null) {
+            height = Math.max(height, clampDimension(bounds.getHeight()));
+        }
         if (width <= 1.0) {
-            width = Math.max(1.0, boundViewport.getLayoutBounds().getWidth());
+            width = 1.0;
         }
         if (height <= 1.0) {
-            height = Math.max(1.0, boundViewport.getLayoutBounds().getHeight());
+            height = 1.0;
         }
-        setWidth(Math.max(1.0, width));
-        setHeight(Math.max(1.0, height));
-        renderLastFrame();
+        boolean changed = false;
+        if (width != getWidth()) {
+            setWidth(width);
+            changed = true;
+        }
+        if (height != getHeight()) {
+            setHeight(height);
+            changed = true;
+        }
+        if (changed) {
+            renderLastFrame();
+        }
+    }
+
+    private void removeViewportListeners() {
+        if (boundViewport != null) {
+            boundViewport.widthProperty().removeListener(widthListener);
+            boundViewport.heightProperty().removeListener(heightListener);
+            boundViewport.layoutBoundsProperty().removeListener(layoutListener);
+            if (viewportSceneListener != null) {
+                boundViewport.sceneProperty().removeListener(viewportSceneListener);
+            }
+        }
+        viewportSceneListener = null;
+    }
+
+    private void installViewportListeners() {
+        if (boundViewport == null) {
+            return;
+        }
+        boundViewport.widthProperty().addListener(widthListener);
+        boundViewport.heightProperty().addListener(heightListener);
+        boundViewport.layoutBoundsProperty().addListener(layoutListener);
+    }
+
+    private double clampDimension(double value) {
+        if (!Double.isFinite(value)) {
+            return 1.0;
+        }
+        return Math.max(1.0, Math.min(MAX_DIMENSION, value));
     }
 
     /**

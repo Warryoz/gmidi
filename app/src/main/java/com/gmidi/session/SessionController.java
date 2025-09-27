@@ -230,6 +230,7 @@ public class SessionController {
             statusLabel.setText(ex.getMessage());
             videoRecordToggle.setSelected(false);
             videoRecorder = null;
+            currentVideoFile = null;
         }
     }
 
@@ -334,6 +335,7 @@ public class SessionController {
             videoSettings.setFps(updated.getFps());
             videoSettings.setCrf(updated.getCrf());
             videoSettings.setPreset(updated.getPreset());
+            videoSettings.setFfmpegExecutable(updated.getFfmpegExecutable());
             statusLabel.setText("Updated settings");
         });
     }

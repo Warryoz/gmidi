@@ -6,11 +6,14 @@ import javafx.scene.image.WritableImage;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
@@ -40,6 +43,7 @@ public class VideoRecorder {
     private OutputStream ffmpegInput;
     private Thread stderrDrainer;
     private final StringBuilder stderrBuffer = new StringBuilder();
+    private String ffmpegExecutablePath;
 
     public void start(Path outputFile, VideoSettings settings) throws IOException {
         Objects.requireNonNull(outputFile, "outputFile");
@@ -53,8 +57,10 @@ public class VideoRecorder {
             Files.createDirectories(parent);
         }
 
+        ffmpegExecutablePath = resolveFfmpegExecutable(settings);
+
         ProcessBuilder builder = new ProcessBuilder(
-                "ffmpeg",
+                ffmpegExecutablePath,
                 "-y",
                 "-f", "image2pipe",
                 "-r", Integer.toString(settings.getFps()),
@@ -69,7 +75,8 @@ public class VideoRecorder {
         try {
             ffmpegProcess = builder.start();
         } catch (IOException ex) {
-            throw new IOException("Unable to start ffmpeg. Ensure it is installed and visible on PATH.", ex);
+            ffmpegExecutablePath = null;
+            throw new IOException("Unable to start ffmpeg at " + builder.command().get(0) + ": " + ex.getMessage(), ex);
         }
 
         ffmpegInput = ffmpegProcess.getOutputStream();
@@ -164,17 +171,23 @@ public class VideoRecorder {
         if (!running.getAndSet(false)) {
             return;
         }
-        encoderExecutor.shutdown();
-        if (!encoderExecutor.awaitTermination(timeout.toMillis(), TimeUnit.MILLISECONDS)) {
-            encoderExecutor.shutdownNow();
+        ExecutorService executor = encoderExecutor;
+        if (executor != null) {
+            executor.shutdown();
+            if (!executor.awaitTermination(timeout.toMillis(), TimeUnit.MILLISECONDS)) {
+                executor.shutdownNow();
+            }
         }
         try {
-            ffmpegInput.close();
+            if (ffmpegInput != null) {
+                ffmpegInput.close();
+            }
         } catch (IOException ignored) {
         }
-        int exit = ffmpegProcess.waitFor();
+        int exit = ffmpegProcess != null ? ffmpegProcess.waitFor() : 0;
         if (stderrDrainer != null) {
             stderrDrainer.join();
+            stderrDrainer = null;
         }
         if (exit != 0) {
             String stderr;
@@ -186,5 +199,66 @@ public class VideoRecorder {
         encoderExecutor = null;
         ffmpegProcess = null;
         ffmpegInput = null;
+        ffmpegExecutablePath = null;
+    }
+
+    private String resolveFfmpegExecutable(VideoSettings settings) throws IOException {
+        Path configured = settings.getFfmpegExecutable();
+        if (configured != null) {
+            Path normalized = configured.toAbsolutePath().normalize();
+            if (!Files.exists(normalized)) {
+                throw new IOException("Configured FFmpeg path does not exist: " + normalized);
+            }
+            if (!Files.isRegularFile(normalized)) {
+                throw new IOException("Configured FFmpeg path is not a file: " + normalized);
+            }
+            if (!Files.isExecutable(normalized)) {
+                throw new IOException("Configured FFmpeg path is not executable: " + normalized);
+            }
+            return normalized.toString();
+        }
+
+        String located = locateOnPath();
+        if (located != null) {
+            return located;
+        }
+
+        logInstallHints();
+        throw new IOException("FFmpeg not found. Install it or set its path in Settings.");
+    }
+
+    private String locateOnPath() {
+        String path = System.getenv("PATH");
+        if (path == null || path.isBlank()) {
+            return null;
+        }
+        String executable = isWindows() ? "ffmpeg.exe" : "ffmpeg";
+        String[] entries = path.split(File.pathSeparator);
+        for (String entry : entries) {
+            if (entry == null || entry.isBlank()) {
+                continue;
+            }
+            try {
+                Path candidate = Paths.get(entry.trim()).resolve(executable);
+                if (Files.isRegularFile(candidate) && Files.isExecutable(candidate)) {
+                    return candidate.toAbsolutePath().toString();
+                }
+            } catch (InvalidPathException ignored) {
+            }
+        }
+        return null;
+    }
+
+    private boolean isWindows() {
+        String os = System.getProperty("os.name");
+        return os != null && os.toLowerCase().contains("win");
+    }
+
+    private void logInstallHints() {
+        String hints = "FFmpeg not found. Install it or set its path in Settings.\n" +
+                "Windows: winget install Gyan.FFmpeg (or choco install ffmpeg)\n" +
+                "macOS: brew install ffmpeg\n" +
+                "Ubuntu: sudo apt install ffmpeg";
+        System.err.println(hints);
     }
 }
