@@ -5,14 +5,7 @@ import java.io.PrintStream;
 import java.nio.file.Path;
 import java.util.Objects;
 import java.util.Scanner;
-import javax.sound.midi.MidiDevice;
-import javax.sound.midi.MidiSystem;
-import javax.sound.midi.MidiUnavailableException;
-import javax.sound.midi.Receiver;
-import javax.sound.midi.Sequence;
-import javax.sound.midi.Sequencer;
-import javax.sound.midi.Track;
-import javax.sound.midi.Transmitter;
+import javax.sound.midi.*;
 
 /**
  * Handles recording events from a MIDI device into a Standard MIDI File.
@@ -64,6 +57,8 @@ public final class MidiRecordingSession {
 
             MidiSystem.write(sequence, 1, outputPath.toFile());
             out.printf("Saved recording to %s%n", outputPath);
+        } catch (InvalidMidiDataException e) {
+            throw new RuntimeException(e);
         }
     }
 }
