@@ -27,12 +27,11 @@ public class KeyboardView extends Region {
         getStyleClass().add("keyboard-view");
         getChildren().add(canvas);
         setPadding(new Insets(12, 16, 12, 16));
-        setMinHeight(100);
-        setPrefHeight(140);
+        setMinHeight(120);
+        setPrefHeight(160);
+        setMaxHeight(200);
         canvas.addEventHandler(MouseEvent.MOUSE_MOVED, e -> handleHover(e, true));
         canvas.addEventHandler(MouseEvent.MOUSE_EXITED, e -> handleHover(e, false));
-        widthProperty().addListener((obs, oldV, newV) -> redraw());
-        heightProperty().addListener((obs, oldV, newV) -> redraw());
     }
 
     public void press(int midiNote) {
@@ -87,17 +86,21 @@ public class KeyboardView extends Region {
 
     @Override
     protected void layoutChildren() {
-        double w = getWidth();
-        double h = getHeight();
-        canvas.setWidth(Math.max(200, w - getPadding().getLeft() - getPadding().getRight()));
-        canvas.setHeight(Math.max(60, h - getPadding().getTop() - getPadding().getBottom()));
-        canvas.relocate(getPadding().getLeft(), getPadding().getTop());
+        Insets padding = getPadding();
+        double contentWidth = Math.max(200, getWidth() - padding.getLeft() - padding.getRight());
+        double contentHeight = Math.max(60, getHeight() - padding.getTop() - padding.getBottom());
+        canvas.setWidth(contentWidth);
+        canvas.setHeight(contentHeight);
+        canvas.relocate(padding.getLeft(), padding.getTop());
         redraw();
     }
 
     private void redraw() {
         double width = canvas.getWidth();
         double height = canvas.getHeight();
+        if (width <= 0 || height <= 0) {
+            return;
+        }
         GraphicsContext gc = canvas.getGraphicsContext2D();
         gc.clearRect(0, 0, width, height);
 

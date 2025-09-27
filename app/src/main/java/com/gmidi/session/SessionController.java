@@ -117,6 +117,13 @@ public class SessionController {
                 onAnimationFrame(now);
             }
         };
+    }
+
+    /**
+     * Starts the visualiser animation loop. This should be invoked once the scene has been shown so
+     * the viewport has valid bounds.
+     */
+    public void startAnimation() {
         animationTimer.start();
     }
 
