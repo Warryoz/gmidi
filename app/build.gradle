@@ -35,6 +35,7 @@ java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(21)
     }
+    modularity.inferModulePath = true
 }
 
 application {
@@ -45,4 +46,12 @@ application {
 
 tasks.named('test') {
     useJUnitPlatform()
+}
+
+tasks.withType(JavaExec).configureEach {
+    jvmArgs '--enable-native-access=ALL-UNNAMED'
+}
+
+tasks.withType(Test).configureEach {
+    jvmArgs '--enable-native-access=ALL-UNNAMED'
 }
