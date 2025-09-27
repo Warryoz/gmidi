@@ -2,57 +2,44 @@ plugins {
     id 'application'
 }
 
-repositories {
-    mavenCentral()
-}
+repositories { mavenCentral() }
 
 def javafxVersion = '21.0.2'
 def nativeAccessArg = '--enable-native-access=ALL-UNNAMED'
 
+// if you only build on Windows you can hardcode 'win'
 def javafxPlatform = {
     def os = org.gradle.internal.os.OperatingSystem.current()
-    if (os.isWindows()) {
-        return 'win'
-    }
-    if (os.isMacOsX()) {
-        return 'mac'
-    }
-    if (os.isLinux()) {
-        return 'linux'
-    }
+    if (os.isWindows()) return 'win'
+    if (os.isMacOsX())  return 'mac'       // use 'mac-aarch64' on Apple Silicon
+    if (os.isLinux())   return 'linux'     // use 'linux-aarch64' on ARM
     throw new GradleException("Unsupported JavaFX platform: " + os)
 }.call()
 
 dependencies {
-    implementation "org.openjfx:javafx-controls:$javafxVersion:$javafxPlatform"
-    implementation "org.openjfx:javafx-graphics:$javafxVersion:$javafxPlatform"
-    implementation "org.openjfx:javafx-base:$javafxVersion:$javafxPlatform"
+    implementation "org.openjfx:javafx-controls:${javafxVersion}:${javafxPlatform}"
+    implementation "org.openjfx:javafx-graphics:${javafxVersion}:${javafxPlatform}"
+    implementation "org.openjfx:javafx-base:${javafxVersion}:${javafxPlatform}"
+
     testImplementation libs.junit.jupiter
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
-javafx {
-    version = '21.0.2'
-    modules = ['javafx.controls']
-}
-
 java {
-    toolchain {
-        languageVersion = JavaLanguageVersion.of(21)
-    }
+    toolchain { languageVersion = JavaLanguageVersion.of(21) }
     modularity.inferModulePath = true
 }
 
 application {
     mainModule = 'com.gmidi'
-    mainClass = 'com.gmidi.App'
+    mainClass  = 'com.gmidi.App'
     applicationDefaultJvmArgs = [nativeAccessArg]
 }
+
 tasks.withType(JavaExec).configureEach {
     modularity.inferModulePath = true
     jvmArgs nativeAccessArg
 }
-
 tasks.withType(Test).configureEach {
     useJUnitPlatform()
     modularity.inferModulePath = true
