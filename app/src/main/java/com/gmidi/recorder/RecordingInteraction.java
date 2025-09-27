@@ -1,6 +1,7 @@
 package com.gmidi.recorder;
 
 import java.nio.file.Path;
+import javax.sound.midi.Receiver;
 
 /**
  * Abstraction for UI layers that guide the user through the recording lifecycle.
@@ -32,8 +33,7 @@ public interface RecordingInteraction {
      * events (for example to visualize pressed keys). Implementations that do
      * not need to intercept events can simply rely on the default behaviour.
      */
-    default javax.sound.midi.Receiver decorateReceiver(javax.sound.midi.Receiver downstream) {
+    default Receiver decorateReceiver(Receiver downstream) {
         return downstream;
     }
-
 }
