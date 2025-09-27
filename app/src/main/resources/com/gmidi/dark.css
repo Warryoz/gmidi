@@ -1,0 +1,162 @@
+.root {
+    -fx-font-family: "Inter", "Segoe UI", "Helvetica Neue", sans-serif;
+    -fx-background-color: #121212;
+    -fx-text-fill: #EDEDED;
+}
+
+.app-root {
+    -fx-background-color: #121212;
+}
+
+.toolbar {
+    -fx-background-color: linear-gradient(to bottom, rgba(30,30,30,0.95), rgba(22,22,22,0.95));
+    -fx-background-radius: 16;
+    -fx-border-color: rgba(42,42,42,0.9);
+    -fx-border-radius: 16;
+    -fx-border-width: 1;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.35), 18, 0, 0, 8);
+    -fx-alignment: center-left;
+}
+
+.bottom-panel {
+    -fx-background-color: rgba(24,24,24,0.9);
+    -fx-border-color: rgba(42,42,42,0.8);
+    -fx-border-width: 1 0 0 0;
+}
+
+.status-bar {
+    -fx-alignment: center-left;
+    -fx-background-color: transparent;
+}
+
+.keyfall-container {
+    -fx-background-color: rgba(18, 18, 18, 0.92);
+    -fx-background-radius: 18;
+    -fx-border-radius: 18;
+    -fx-border-color: rgba(42,42,42,0.9);
+    -fx-border-width: 1;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.45), 22, 0, 0, 18);
+}
+
+.keyboard-view {
+    -fx-background-color: rgba(24,24,24,0.9);
+    -fx-background-radius: 18;
+    -fx-border-radius: 18;
+    -fx-border-color: rgba(42,42,42,0.9);
+    -fx-border-width: 1;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.35), 20, 0, 0, 16);
+}
+
+.label, .info-label, .status-label {
+    -fx-text-fill: #EDEDED;
+    -fx-font-smoothing-type: lcd;
+}
+
+.info-label {
+    -fx-opacity: 0.85;
+}
+
+.status-label {
+    -fx-font-weight: 600;
+}
+
+.button, .toggle-button, .combo-box-base {
+    -fx-background-radius: 14;
+    -fx-border-radius: 14;
+    -fx-background-color: rgba(32,32,32,0.85);
+    -fx-border-color: rgba(60,60,60,0.8);
+    -fx-border-width: 1;
+    -fx-text-fill: #EDEDED;
+    -fx-padding: 8 16;
+}
+
+.button:hover, .toggle-button:hover, .combo-box-base:hover {
+    -fx-background-color: rgba(45,45,45,0.9);
+}
+
+.button:focused, .toggle-button:focused, .combo-box-base:focused {
+    -fx-effect: dropshadow(gaussian, rgba(44,228,208,0.45), 18, 0.25, 0, 0);
+}
+
+.combo-box .list-view {
+    -fx-background-color: #1E1E1E;
+    -fx-border-color: rgba(60,60,60,0.8);
+}
+
+.accent-button {
+    -fx-background-color: rgba(44, 228, 208, 0.18);
+    -fx-border-color: rgba(44, 228, 208, 0.8);
+    -fx-text-fill: #E1FFFB;
+}
+
+.accent-button:hover {
+    -fx-background-color: rgba(44, 228, 208, 0.32);
+}
+
+.accent-toggle:selected {
+    -fx-background-color: rgba(44, 228, 208, 0.38);
+    -fx-border-color: rgba(44, 228, 208, 0.9);
+}
+
+.accent-toggle:selected:hover {
+    -fx-background-color: rgba(44, 228, 208, 0.5);
+}
+
+.icon-button {
+    -fx-padding: 8 12;
+    -fx-font-size: 16px;
+}
+
+.mode-toggle {
+    -fx-padding: 8 14;
+}
+
+.session-progress {
+    -fx-accent: #2CE4D0;
+    -fx-control-inner-background: rgba(32,32,32,0.8);
+    -fx-background-insets: 0;
+    -fx-background-radius: 0;
+}
+
+.progress-bar > .track {
+    -fx-background-color: rgba(32,32,32,0.8);
+}
+
+.progress-bar > .bar {
+    -fx-background-color: linear-gradient(to right, #2CE4D0, #21B4BF);
+    -fx-background-radius: 0;
+}
+
+.tooltip {
+    -fx-background-color: rgba(32,32,32,0.95);
+    -fx-text-fill: #EDEDED;
+    -fx-background-radius: 8;
+    -fx-padding: 6 10;
+}
+
+.dialog-pane {
+    -fx-background-color: #1E1E1E;
+    -fx-border-color: rgba(60,60,60,0.8);
+    -fx-border-radius: 16;
+    -fx-background-radius: 16;
+}
+
+.dialog-pane .label {
+    -fx-text-fill: #EDEDED;
+}
+
+.text-field, .choice-box {
+    -fx-background-color: rgba(28,28,28,0.9);
+    -fx-text-fill: #EDEDED;
+    -fx-border-color: rgba(60,60,60,0.8);
+    -fx-border-radius: 10;
+    -fx-background-radius: 10;
+}
+
+.choice-box .context-menu {
+    -fx-background-color: rgba(24,24,24,0.95);
+}
+
+.settings-dialog .button {
+    -fx-padding: 8 18;
+}
