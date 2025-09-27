@@ -11,6 +11,9 @@ def javafxVersion = '21.0.2'
 def nativeAccessArg = '--enable-native-access=ALL-UNNAMED'
 
 dependencies {
+    implementation "org.openjfx:javafx-controls:$javafxVersion"
+    implementation "org.openjfx:javafx-graphics:$javafxVersion"
+    implementation "org.openjfx:javafx-base:$javafxVersion"
     testImplementation libs.junit.jupiter
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
