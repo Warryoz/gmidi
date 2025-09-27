@@ -8,9 +8,11 @@ repositories {
     mavenCentral()
 }
 
-def javafxVersion = '21.0.2'
+def javafxVersion = '23.0.2'
 def os = OperatingSystem.current()
 def platformClassifier = os.isWindows() ? 'win' : (os.isMacOsX() ? 'mac' : 'linux')
+
+def nativeAccessArg = '--enable-native-access=ALL-UNNAMED'
 
 dependencies {
     implementation "org.openjfx:javafx-controls:${javafxVersion}"
@@ -29,14 +31,22 @@ java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(21)
     }
+    modularity.inferModulePath = true
 }
 
 application {
     mainModule = 'com.gmidi'
     mainClass = 'com.gmidi.App'
-    applicationDefaultJvmArgs = ['--enable-native-access=ALL-UNNAMED']
+    applicationDefaultJvmArgs = [nativeAccessArg]
 }
 
-tasks.named('test') {
+tasks.withType(JavaExec).configureEach {
+    modularity.inferModulePath = true
+    jvmArgs nativeAccessArg
+}
+
+tasks.withType(Test).configureEach {
     useJUnitPlatform()
+    modularity.inferModulePath = true
+    jvmArgs nativeAccessArg
 }
