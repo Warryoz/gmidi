@@ -18,6 +18,7 @@ public final class App {
 
     public static void main(String[] args) {
         if (wantsGui(args)) {
+            System.setProperty("prism.marlin.useUnsafe", "false");
             MidiRecorderApp.launchApp();
             return;
         }
