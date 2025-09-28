@@ -7,7 +7,6 @@ import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
 import javafx.scene.layout.Region;
 import javafx.scene.paint.Color;
-import javafx.scene.transform.Affine;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -158,8 +157,8 @@ public class KeyFallCanvas extends Canvas {
     }
 
     private void applyBoundsOnce(double viewportW, double viewportH) {
-        double vw = clamp(viewportW, MIN_W, MAX_W * 1.25);
-        double vh = clamp(viewportH, MIN_H, MAX_H * 1.25);
+        double vw = clamp(viewportW, 1.0, MAX_W * 1.25);
+        double vh = clamp(viewportH, 1.0, MAX_H * 1.25);
         if (!Double.isFinite(vw) || !Double.isFinite(vh)) {
             return;
         }
@@ -336,7 +335,7 @@ public class KeyFallCanvas extends Canvas {
 
     private void draw(long nowMicros) {
         GraphicsContext g = getGraphicsContext2D();
-        g.setTransform(new Affine());
+        g.setTransform(1, 0, 0, 1, 0, 0);
         g.clearRect(0, 0, canvasW, canvasH);
 
         if (viewportWidth <= 0 || viewportHeight <= 0) {
@@ -345,6 +344,9 @@ public class KeyFallCanvas extends Canvas {
 
         g.save();
         g.scale(renderScaleX, renderScaleY);
+        g.beginPath();
+        g.rect(0, 0, viewportWidth, viewportHeight);
+        g.clip();
         g.setFill(NOTE_COLOR);
 
         final double keyboardLine = viewportHeight;

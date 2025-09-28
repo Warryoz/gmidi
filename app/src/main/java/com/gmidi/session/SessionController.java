@@ -16,10 +16,8 @@ import com.gmidi.video.VideoSettings;
 import javafx.animation.AnimationTimer;
 import javafx.application.Platform;
 import javafx.beans.binding.Bindings;
-import javafx.beans.property.DoubleProperty;
-import javafx.beans.property.ReadOnlyDoubleProperty;
-import javafx.beans.property.SimpleDoubleProperty;
 import javafx.scene.Node;
+import javafx.scene.Scene;
 import javafx.scene.SnapshotParameters;
 import javafx.scene.control.Button;
 import javafx.scene.control.ComboBox;
@@ -28,8 +26,11 @@ import javafx.scene.control.ProgressBar;
 import javafx.scene.control.Slider;
 import javafx.scene.control.ToggleButton;
 import javafx.scene.image.WritableImage;
+import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.Region;
+import javafx.scene.layout.StackPane;
 import javafx.scene.paint.Color;
+import javafx.scene.shape.Rectangle;
 import javafx.scene.transform.Transform;
 import javafx.stage.FileChooser;
 import javafx.stage.Window;
@@ -108,7 +109,12 @@ public class SessionController {
     private String preferredInstrumentName = "Grand Piano";
     private VelCurve velocityCurve = VelCurve.LINEAR;
     private boolean playbackActive;
-    private final DoubleProperty keyboardHeightRatio = new SimpleDoubleProperty(PianoKeyLayout.KEYBOARD_HEIGHT_RATIO);
+    private static final double KB_HEIGHT_RATIO = 0.24;
+    private static final double KB_MIN = 140.0;
+    private static final double KB_MAX = 260.0;
+    private static final String DARK_THEME = Objects.requireNonNull(
+            SessionController.class.getResource("/DarkTheme.css"))
+            .toExternalForm();
 
     public SessionController(MidiService midiService,
                              KeyboardView keyboardView,
@@ -153,6 +159,7 @@ public class SessionController {
         this.keyFallCanvas.setOnImpact((note, intensity) -> keyboardView.flash(note, intensity));
         this.keyFallCanvas.setVelocityCurve(velocityCurve);
 
+        configureViewportLayout();
         configureFallDurationSlider();
         configurePlaybackControls();
         configureKeyboardSizing();
@@ -182,6 +189,50 @@ public class SessionController {
         };
     }
 
+    /**
+     * Ensures the canvas lives inside a clipped stack pane so resizes never collapse to zero
+     * pixels and the keyboard stays anchored at the bottom.
+     */
+    private void configureViewportLayout() {
+        if (!(captureNode instanceof Region region)) {
+            keyFallCanvas.setMouseTransparent(true);
+            return;
+        }
+
+        StackPane resolvedPane = null;
+        if (region instanceof BorderPane borderPane) {
+            Node center = borderPane.getCenter();
+            if (center instanceof StackPane stack) {
+                resolvedPane = stack;
+            } else {
+                resolvedPane = new StackPane();
+                if (center != null) {
+                    resolvedPane.getChildren().add(center);
+                }
+                borderPane.setCenter(resolvedPane);
+            }
+            borderPane.setBottom(keyboardView);
+        } else if (region instanceof StackPane stack) {
+            resolvedPane = stack;
+        }
+
+        if (resolvedPane == null) {
+            resolvedPane = new StackPane();
+        }
+
+        Rectangle clip = new Rectangle();
+        clip.widthProperty().bind(resolvedPane.widthProperty());
+        clip.heightProperty().bind(resolvedPane.heightProperty());
+        resolvedPane.setClip(clip);
+
+        if (!resolvedPane.getChildren().contains(keyFallCanvas)) {
+            resolvedPane.getChildren().add(keyFallCanvas);
+        }
+        keyFallCanvas.setMouseTransparent(true);
+
+        keyFallCanvas.bindTo(resolvedPane);
+    }
+
     private void configureFallDurationSlider() {
         if (fallDurationSlider == null || fallDurationLabel == null) {
             return;
@@ -200,33 +251,47 @@ public class SessionController {
     }
 
     private void configureKeyboardSizing() {
+        keyboardView.setMinHeight(KB_MIN);
+        keyboardView.setMaxHeight(KB_MAX);
         keyboardView.sceneProperty().addListener((obs, oldScene, newScene) -> {
             if (oldScene != null) {
                 keyboardView.prefHeightProperty().unbind();
             }
             if (newScene != null) {
-                bindKeyboardHeight(newScene.heightProperty());
+                bindResponsiveKeyboardHeight(newScene, keyboardView);
+                applyDarkTheme(newScene);
             }
         });
-        if (keyboardView.getScene() != null) {
-            bindKeyboardHeight(keyboardView.getScene().heightProperty());
+        Scene scene = keyboardView.getScene();
+        if (scene != null) {
+            bindResponsiveKeyboardHeight(scene, keyboardView);
+            applyDarkTheme(scene);
         }
     }
 
-    private void bindKeyboardHeight(ReadOnlyDoubleProperty sceneHeight) {
-        if (sceneHeight == null) {
+    private void bindResponsiveKeyboardHeight(Scene scene, KeyboardView kb) {
+        var kbHeight = Bindings.createDoubleBinding(() -> {
+            double h = scene.getHeight() * KB_HEIGHT_RATIO;
+            if (h < KB_MIN) {
+                h = KB_MIN;
+            }
+            if (h > KB_MAX) {
+                h = KB_MAX;
+            }
+            return h;
+        }, scene.heightProperty());
+        kb.minHeightProperty().set(KB_MIN);
+        kb.maxHeightProperty().set(KB_MAX);
+        kb.prefHeightProperty().bind(kbHeight);
+    }
+
+    private void applyDarkTheme(Scene scene) {
+        if (scene == null) {
             return;
         }
-        keyboardView.prefHeightProperty().bind(Bindings.createDoubleBinding(
-                () -> clampKeyboardHeight(sceneHeight.get() * keyboardHeightRatio.get()),
-                sceneHeight,
-                keyboardHeightRatio));
-    }
-
-    private double clampKeyboardHeight(double desired) {
-        double min = keyboardView.getMinHeight();
-        double max = keyboardView.getMaxHeight();
-        return Math.max(min, Math.min(max, desired));
+        if (!scene.getStylesheets().contains(DARK_THEME)) {
+            scene.getStylesheets().add(DARK_THEME);
+        }
     }
 
     private void updateFallDurationLabel(double seconds) {
