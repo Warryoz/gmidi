@@ -3,13 +3,19 @@ package com.gmidi.session;
 import com.gmidi.midi.MidiRecorder;
 import com.gmidi.midi.MidiReplayer;
 import com.gmidi.midi.MidiService;
+import com.gmidi.midi.MidiService.ReverbPreset;
 import com.gmidi.ui.KeyFallCanvas;
 import com.gmidi.ui.KeyboardView;
 import com.gmidi.ui.KeyFallCanvas.VelCurve;
+import com.gmidi.ui.PianoKeyLayout;
 import com.gmidi.video.VideoRecorder;
 import com.gmidi.video.VideoSettings;
 import javafx.animation.AnimationTimer;
 import javafx.application.Platform;
+import javafx.beans.binding.Bindings;
+import javafx.beans.property.DoubleProperty;
+import javafx.beans.property.ReadOnlyDoubleProperty;
+import javafx.beans.property.SimpleDoubleProperty;
 import javafx.scene.Node;
 import javafx.scene.SnapshotParameters;
 import javafx.scene.control.Button;
@@ -22,12 +28,16 @@ import javafx.scene.image.WritableImage;
 import javafx.scene.layout.Region;
 import javafx.scene.paint.Color;
 import javafx.scene.transform.Transform;
+import javafx.stage.FileChooser;
+import javafx.stage.Window;
 
 import javax.sound.midi.InvalidMidiDataException;
 import javax.sound.midi.MidiUnavailableException;
 import javax.sound.midi.Synthesizer;
+import javax.sound.midi.Sequence;
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
@@ -38,6 +48,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
+import java.nio.file.StandardCopyOption;
 
 /**
  * Coordinates MIDI input, recording, the piano visualiser, and video capture. The controller is the
@@ -64,7 +75,9 @@ public class SessionController {
     private final Slider fallDurationSlider;
     private final Label fallDurationLabel;
     private final Button replayPlayButton;
+    private final Button replayPauseButton;
     private final Button replayStopButton;
+    private final Button openMidiButton;
 
     private final VideoSettings videoSettings = new VideoSettings();
     private VideoRecorder videoRecorder;
@@ -78,6 +91,10 @@ public class SessionController {
 
     private Path currentMidiFile;
     private Path currentVideoFile;
+    private Path currentVideoTempFile;
+    private Path currentAudioFile;
+    private Path loadedReplayFile;
+    private boolean recordingReplay;
 
     private final AnimationTimer animationTimer;
     private MidiReplayer midiReplayer;
@@ -87,6 +104,7 @@ public class SessionController {
     private String preferredInstrumentName = "Grand Piano";
     private VelCurve velocityCurve = VelCurve.LINEAR;
     private boolean playbackActive;
+    private final DoubleProperty keyboardHeightRatio = new SimpleDoubleProperty(PianoKeyLayout.KEYBOARD_HEIGHT_RATIO);
 
     public SessionController(MidiService midiService,
                              KeyboardView keyboardView,
@@ -104,7 +122,9 @@ public class SessionController {
                              Slider fallDurationSlider,
                              Label fallDurationLabel,
                              Button replayPlayButton,
-                             Button replayStopButton) {
+                             Button replayPauseButton,
+                             Button replayStopButton,
+                             Button openMidiButton) {
         this.midiService = midiService;
         this.keyboardView = keyboardView;
         this.keyFallCanvas = keyFallCanvas;
@@ -121,7 +141,9 @@ public class SessionController {
         this.fallDurationSlider = fallDurationSlider;
         this.fallDurationLabel = fallDurationLabel;
         this.replayPlayButton = replayPlayButton;
+        this.replayPauseButton = replayPauseButton;
         this.replayStopButton = replayStopButton;
+        this.openMidiButton = openMidiButton;
         this.soundFontPath = midiService.getCurrentSoundFontPath();
 
         this.keyFallCanvas.setOnImpact((note, intensity) -> keyboardView.flash(note, intensity));
@@ -129,6 +151,7 @@ public class SessionController {
 
         configureFallDurationSlider();
         configurePlaybackControls();
+        configureKeyboardSizing();
         initialiseSynth();
 
         deviceCombo.setOnAction(e -> connectToSelectedDevice());
@@ -172,17 +195,50 @@ public class SessionController {
         });
     }
 
+    private void configureKeyboardSizing() {
+        keyboardView.sceneProperty().addListener((obs, oldScene, newScene) -> {
+            if (oldScene != null) {
+                keyboardView.prefHeightProperty().unbind();
+            }
+            if (newScene != null) {
+                bindKeyboardHeight(newScene.heightProperty());
+            }
+        });
+        if (keyboardView.getScene() != null) {
+            bindKeyboardHeight(keyboardView.getScene().heightProperty());
+        }
+    }
+
+    private void bindKeyboardHeight(ReadOnlyDoubleProperty sceneHeight) {
+        if (sceneHeight == null) {
+            return;
+        }
+        keyboardView.prefHeightProperty().bind(Bindings.createDoubleBinding(
+                () -> clampKeyboardHeight(sceneHeight.get() * keyboardHeightRatio.get()),
+                sceneHeight,
+                keyboardHeightRatio));
+    }
+
+    private double clampKeyboardHeight(double desired) {
+        double min = keyboardView.getMinHeight();
+        double max = keyboardView.getMaxHeight();
+        return Math.max(min, Math.min(max, desired));
+    }
+
     private void updateFallDurationLabel(double seconds) {
         fallDurationLabel.setText(String.format("Fall: %.1fs", seconds));
         keyFallCanvas.setFallDurationSeconds(seconds);
     }
 
     private void configurePlaybackControls() {
-        if (replayPlayButton == null || replayStopButton == null) {
+        if (replayPlayButton == null || replayPauseButton == null || replayStopButton == null
+                || openMidiButton == null) {
             return;
         }
         replayPlayButton.setOnAction(e -> playRecording());
+        replayPauseButton.setOnAction(e -> pausePlayback());
         replayStopButton.setOnAction(e -> stopPlayback());
+        openMidiButton.setOnAction(e -> openMidiFile());
         refreshPlaybackControls();
     }
 
@@ -218,19 +274,23 @@ public class SessionController {
                 keyFallCanvas.onNoteOff(midi, tNanos);
                 keyboardView.release(midi);
             }
-        }, synthesizer);
+        }, synthesizer, midiService::getTranspose);
         replayer.setOnFinished(this::onPlaybackFinished);
         return replayer;
     }
 
     private void refreshPlaybackControls() {
-        if (replayPlayButton == null || replayStopButton == null) {
+        if (replayPlayButton == null || replayPauseButton == null || replayStopButton == null) {
             return;
         }
-        boolean hasEvents = !midiRecorder.getEvents().isEmpty();
+        boolean recordedAvailable = !midiRecorder.getEvents().isEmpty();
+        boolean sequenceLoaded = midiReplayer != null && midiReplayer.hasSequence();
         boolean playing = midiReplayer != null && midiReplayer.isPlaying();
-        replayPlayButton.setDisable(!hasEvents || playing);
-        replayStopButton.setDisable(!playing);
+        boolean paused = midiReplayer != null && midiReplayer.isPaused();
+        boolean playable = recordedAvailable || sequenceLoaded;
+        replayPlayButton.setDisable(!playable || playing);
+        replayPauseButton.setDisable(!playing);
+        replayStopButton.setDisable(!(playing || paused));
     }
 
     private void playRecording() {
@@ -238,35 +298,99 @@ public class SessionController {
             statusLabel.setText("Playback unavailable");
             return;
         }
-        List<MidiRecorder.Event> events = midiRecorder.getEvents();
-        if (events.isEmpty()) {
-            statusLabel.setText("Record something to replay");
+        boolean sequenceReady = midiReplayer.hasSequence();
+        if (!sequenceReady) {
+            sequenceReady = prepareRecordedSequence();
+        }
+        if (!sequenceReady) {
+            statusLabel.setText("Load a MIDI file or record a take first");
             refreshPlaybackControls();
             return;
+        }
+        if (midiReplayer.isAtEnd()) {
+            midiReplayer.rewind();
+        }
+        keyFallCanvas.clear();
+        midiReplayer.play();
+        playbackActive = true;
+        if (midiReplayer.isSequenceFromFile() && midiReplayer.getSequenceFile() != null) {
+            statusLabel.setText("Playing " + midiReplayer.getSequenceFile().getFileName());
+        } else {
+            statusLabel.setText("Replaying MIDI capture");
+        }
+        refreshPlaybackControls();
+    }
+
+    private boolean prepareRecordedSequence() {
+        List<MidiRecorder.Event> events = midiRecorder.getEvents();
+        if (events.isEmpty()) {
+            return false;
         }
         try {
             midiReplayer.setProgram(midiService.getCurrentProgram());
             midiReplayer.setSequenceFromRecorded(events, MidiRecorder.PPQ, midiRecorder.getInitialBpm());
-            keyFallCanvas.clear();
-            midiReplayer.play();
-            playbackActive = true;
-            statusLabel.setText("Replaying MIDI");
+            loadedReplayFile = currentMidiFile;
+            return true;
         } catch (InvalidMidiDataException ex) {
             statusLabel.setText("Replay failed: " + ex.getMessage());
+            return false;
+        }
+    }
+
+    private void pausePlayback() {
+        if (midiReplayer != null && midiReplayer.isPlaying()) {
+            midiReplayer.pause();
+            playbackActive = false;
+            statusLabel.setText("Playback paused");
+        }
+        refreshPlaybackControls();
+    }
+
+    private void openMidiFile() {
+        if (midiReplayer == null) {
+            statusLabel.setText("Synth unavailable for playback");
+            return;
+        }
+        FileChooser chooser = new FileChooser();
+        chooser.setTitle("Open MIDI File");
+        chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("MIDI Files", "*.mid", "*.midi"));
+        if (loadedReplayFile != null && loadedReplayFile.getParent() != null) {
+            File parent = loadedReplayFile.getParent().toFile();
+            if (parent.isDirectory()) {
+                chooser.setInitialDirectory(parent);
+            }
+        }
+        Window window = resolveWindow();
+        File selected = chooser.showOpenDialog(window);
+        if (selected == null) {
+            return;
+        }
+        stopPlayback();
+        keyFallCanvas.clear();
+        try {
+            midiReplayer.loadSequenceFromFile(selected, midiService.getCurrentProgram());
+            loadedReplayFile = selected.toPath();
+            statusLabel.setText("Loaded MIDI file → " + selected.getName());
+        } catch (IOException | InvalidMidiDataException ex) {
+            statusLabel.setText("Load failed: " + ex.getMessage());
         }
         refreshPlaybackControls();
     }
 
     private void stopPlayback() {
-        if (midiReplayer != null && midiReplayer.isPlaying()) {
+        if (midiReplayer != null && (midiReplayer.isPlaying() || midiReplayer.isPaused())) {
             midiReplayer.stop();
+            playbackActive = false;
+            keyFallCanvas.clear();
+            statusLabel.setText("Playback stopped");
         }
+        refreshPlaybackControls();
     }
 
     private void onPlaybackFinished() {
         if (playbackActive) {
             playbackActive = false;
-            statusLabel.setText("Playback stopped");
+            statusLabel.setText("Playback finished");
         }
         refreshPlaybackControls();
     }
@@ -462,7 +586,16 @@ public class SessionController {
     }
 
     private void startVideoRecording() {
-        if (!midiRecordToggle.isSelected()) {
+        boolean capturingLive = midiRecordToggle.isSelected();
+        boolean sequenceReady = midiReplayer != null && midiReplayer.hasSequence();
+        if (!capturingLive && !sequenceReady) {
+            if (prepareRecordedSequence()) {
+                sequenceReady = true;
+            }
+        }
+        boolean capturingReplayNow = !capturingLive && sequenceReady;
+        if (!capturingLive && !capturingReplayNow) {
+            statusLabel.setText("Start playback or recording before capturing video");
             videoRecordToggle.setSelected(false);
             return;
         }
@@ -477,10 +610,43 @@ public class SessionController {
                 region.layout();
             }
         }
-        String baseName = currentMidiFile != null ? stripExtension(currentMidiFile.getFileName().toString())
-                : FILE_FORMAT.format(LocalDateTime.now());
+        Sequence sequence = capturingReplayNow ? midiReplayer.getCurrentSequence() : null;
+        if (capturingReplayNow && sequence == null) {
+            statusLabel.setText("No MIDI sequence ready for replay capture");
+            videoRecordToggle.setSelected(false);
+            return;
+        }
         Path outputDir = Optional.ofNullable(videoSettings.getOutputDirectory()).orElse(Paths.get("recordings"));
-        currentVideoFile = outputDir.resolve(baseName + ".mp4");
+        String baseName;
+        if (capturingLive && currentMidiFile != null) {
+            baseName = stripExtension(currentMidiFile.getFileName().toString());
+        } else if (capturingReplayNow && midiReplayer.getSequenceFile() != null) {
+            baseName = stripExtension(midiReplayer.getSequenceFile().getFileName().toString());
+        } else if (loadedReplayFile != null) {
+            baseName = stripExtension(loadedReplayFile.getFileName().toString());
+        } else {
+            baseName = FILE_FORMAT.format(LocalDateTime.now());
+        }
+        Path finalVideo = outputDir.resolve(baseName + ".mp4");
+        Path rawVideo = capturingReplayNow ? outputDir.resolve(baseName + "-video.mp4") : finalVideo;
+        currentVideoFile = finalVideo;
+        currentVideoTempFile = rawVideo;
+        currentAudioFile = null;
+        recordingReplay = false;
+
+        if (capturingReplayNow && sequence != null) {
+            Path audioOut = outputDir.resolve(baseName + ".wav");
+            try {
+                midiReplayer.renderToWav(sequence, audioOut, midiService.getReverbPreset(), midiService.getTranspose());
+                currentAudioFile = audioOut;
+                recordingReplay = true;
+            } catch (Exception ex) {
+                statusLabel.setText("Audio render failed: " + ex.getMessage() + ". Video will be silent.");
+                recordingReplay = false;
+                currentAudioFile = null;
+            }
+        }
+
         videoRecorder = new VideoRecorder();
         try {
             double captureWidth = captureNode.getLayoutBounds().getWidth();
@@ -493,15 +659,25 @@ public class SessionController {
                     videoSettings.getWidth(),
                     videoSettings.getHeight(),
                     videoSettings.getFps());
-            videoRecorder.start(currentVideoFile, videoSettings);
+            videoRecorder.start(rawVideo, videoSettings);
             videoFrameIntervalNanos = Math.max(1L, Math.round(1_000_000_000.0 / Math.max(1, videoSettings.getFps())));
             lastVideoCaptureNanos = 0;
-            statusLabel.setText("Recording video → " + currentVideoFile.getFileName());
+            String targetLabel = recordingReplay && currentAudioFile != null ? "video+audio" : "video";
+            statusLabel.setText("Recording " + targetLabel + " → " + finalVideo.getFileName());
         } catch (IOException ex) {
             statusLabel.setText(ex.getMessage());
             videoRecordToggle.setSelected(false);
             videoRecorder = null;
             currentVideoFile = null;
+            currentVideoTempFile = null;
+            if (currentAudioFile != null) {
+                try {
+                    Files.deleteIfExists(currentAudioFile);
+                } catch (IOException ignored) {
+                }
+            }
+            currentAudioFile = null;
+            recordingReplay = false;
         }
     }
 
@@ -511,12 +687,67 @@ public class SessionController {
         }
         try {
             videoRecorder.stop(Duration.ofSeconds(5));
-            statusLabel.setText(currentVideoFile != null ? "Saved video " + currentVideoFile.getFileName() : "Video stopped");
+            Path videoSource = currentVideoTempFile != null ? currentVideoTempFile : currentVideoFile;
+            if (recordingReplay && currentAudioFile != null && videoSource != null) {
+                Path target = currentVideoFile != null ? currentVideoFile : videoSource;
+                try {
+                    videoRecorder.muxWithAudio(videoSource, currentAudioFile, target, videoSettings);
+                    if (!videoSource.equals(target)) {
+                        Files.deleteIfExists(videoSource);
+                    }
+                    Files.deleteIfExists(currentAudioFile);
+                    currentVideoFile = target;
+                    statusLabel.setText("Saved video " + target.getFileName());
+                } catch (IOException muxEx) {
+                    statusLabel.setText("Mux failed: " + muxEx.getMessage() + ". Video saved without audio.");
+                    if (currentVideoFile != null && !videoSource.equals(currentVideoFile)) {
+                        Files.move(videoSource, currentVideoFile, StandardCopyOption.REPLACE_EXISTING);
+                    } else {
+                        currentVideoFile = videoSource;
+                    }
+                }
+            } else {
+                String message;
+                if (currentVideoFile == null) {
+                    currentVideoFile = videoSource;
+                    message = currentVideoFile != null ? "Saved video " + currentVideoFile.getFileName() : "Video stopped";
+                } else if (videoSource != null && !videoSource.equals(currentVideoFile)) {
+                    try {
+                        Files.move(videoSource, currentVideoFile, StandardCopyOption.REPLACE_EXISTING);
+                        message = "Saved video " + currentVideoFile.getFileName();
+                    } catch (IOException moveEx) {
+                        message = "Video saved, but move failed: " + moveEx.getMessage();
+                        currentVideoFile = videoSource;
+                    }
+                } else {
+                    message = currentVideoFile != null ? "Saved video " + currentVideoFile.getFileName() : "Video stopped";
+                }
+                statusLabel.setText(message);
+            }
         } catch (IOException | InterruptedException ex) {
             statusLabel.setText("Video stop failed: " + ex.getMessage());
         } finally {
             videoRecorder = null;
+            recordingReplay = false;
+            currentVideoTempFile = null;
+            if (currentAudioFile != null) {
+                try {
+                    Files.deleteIfExists(currentAudioFile);
+                } catch (IOException ignored) {
+                }
+            }
+            currentAudioFile = null;
         }
+    }
+
+    private Window resolveWindow() {
+        if (openMidiButton != null && openMidiButton.getScene() != null) {
+            return openMidiButton.getScene().getWindow();
+        }
+        if (captureNode != null && captureNode.getScene() != null) {
+            return captureNode.getScene().getWindow();
+        }
+        return null;
     }
 
     private String stripExtension(String filename) {
@@ -604,6 +835,8 @@ public class SessionController {
                 availableInstruments,
                 preferredInstrumentName,
                 velocityCurve,
+                midiService.getTranspose(),
+                midiService.getReverbPreset(),
                 owner);
         dialog.showAndWait().ifPresent(result -> {
             VideoSettings updated = result.videoSettings();
@@ -617,10 +850,16 @@ public class SessionController {
 
             boolean soundSettingsChanged = false;
             boolean velocityChanged = false;
+            boolean transposeChanged = false;
+            boolean reverbChanged = false;
 
             String newSoundFont = result.soundFontPath().orElse(null);
             String newInstrument = result.instrumentName().orElse(null);
             VelCurve newCurve = result.velocityCurve();
+            int requestedTranspose = result.transposeSemis();
+            ReverbPreset requestedPreset = result.reverbPreset();
+            int previousTranspose = midiService.getTranspose();
+            ReverbPreset previousPreset = midiService.getReverbPreset();
 
             String normalizedCurrent = soundFontPath == null ? null : soundFontPath;
             String normalizedNew = (newSoundFont == null || newSoundFont.isBlank()) ? null : newSoundFont.trim();
@@ -643,12 +882,44 @@ public class SessionController {
                 velocityChanged = true;
             }
 
-            if (!soundSettingsChanged && !velocityChanged) {
-                statusLabel.setText("Updated settings");
-            } else if (!soundSettingsChanged && velocityChanged) {
+            if (requestedTranspose != previousTranspose) {
+                midiService.setTranspose(requestedTranspose);
+                transposeChanged = true;
+            }
+
+            if (requestedPreset != null && requestedPreset != previousPreset) {
+                midiService.setReverbPreset(requestedPreset);
+                reverbChanged = true;
+            }
+
+            StringBuilder feedback = new StringBuilder();
+            if (soundSettingsChanged) {
+                feedback.append("Sound updated");
+            }
+            if (velocityChanged) {
+                if (feedback.length() > 0) {
+                    feedback.append(" · ");
+                }
                 String curveLabel = velocityCurve.name().charAt(0)
                         + velocityCurve.name().substring(1).toLowerCase(Locale.ROOT);
-                statusLabel.setText("Velocity curve: " + curveLabel);
+                feedback.append("Velocity curve: ").append(curveLabel);
+            }
+            if (transposeChanged) {
+                if (feedback.length() > 0) {
+                    feedback.append(" · ");
+                }
+                feedback.append(String.format("Transpose: %+d", requestedTranspose));
+            }
+            if (reverbChanged) {
+                if (feedback.length() > 0) {
+                    feedback.append(" · ");
+                }
+                feedback.append("Reverb: ").append(requestedPreset);
+            }
+            if (feedback.length() == 0) {
+                statusLabel.setText("Updated settings");
+            } else {
+                statusLabel.setText(feedback.toString());
             }
         });
     }

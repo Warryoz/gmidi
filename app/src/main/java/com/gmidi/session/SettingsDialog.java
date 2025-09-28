@@ -1,5 +1,6 @@
 package com.gmidi.session;
 
+import com.gmidi.midi.MidiService;
 import com.gmidi.ui.KeyFallCanvas.VelCurve;
 import com.gmidi.video.FfmpegLocator;
 import com.gmidi.video.VideoSettings;
@@ -11,8 +12,11 @@ import javafx.scene.Node;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.ChoiceBox;
+import javafx.scene.control.ComboBox;
 import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
+import javafx.scene.control.Spinner;
+import javafx.scene.control.SpinnerValueFactory;
 import javafx.scene.control.TextField;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.Priority;
@@ -47,6 +51,8 @@ public class SettingsDialog extends Dialog<SettingsDialog.Result> {
                          List<String> instrumentNames,
                          String currentInstrument,
                          VelCurve currentCurve,
+                         int currentTranspose,
+                         MidiService.ReverbPreset reverbPreset,
                          Node owner) {
         setTitle("Recorder Settings");
         getDialogPane().getButtonTypes().addAll(ButtonType.CANCEL, ButtonType.OK);
@@ -168,8 +174,20 @@ public class SettingsDialog extends Dialog<SettingsDialog.Result> {
         GridPane.setHgrow(soundFontField, Priority.ALWAYS);
         grid.addRow(6, new Label("Instrument"), instrumentChoice);
         grid.addRow(7, new Label("Velocity curve"), velocityChoice);
-        grid.addRow(8, new Label("FFmpeg path"), ffmpegField);
-        grid.add(ffmpegStatus, 1, 9, 2, 1);
+
+        SpinnerValueFactory.IntegerSpinnerValueFactory transposeFactory =
+                new SpinnerValueFactory.IntegerSpinnerValueFactory(-24, 24, currentTranspose, 1);
+        Spinner<Integer> transposeSpinner = new Spinner<>(transposeFactory);
+        transposeSpinner.setEditable(false);
+        grid.addRow(8, new Label("Transpose"), transposeSpinner);
+
+        ComboBox<MidiService.ReverbPreset> reverbChoice =
+                new ComboBox<>(FXCollections.observableArrayList(MidiService.ReverbPreset.values()));
+        reverbChoice.setValue(reverbPreset == null ? MidiService.ReverbPreset.ROOM : reverbPreset);
+        grid.addRow(9, new Label("Reverb"), reverbChoice);
+
+        grid.addRow(10, new Label("FFmpeg path"), ffmpegField);
+        grid.add(ffmpegStatus, 1, 11, 2, 1);
 
         getDialogPane().setContent(grid);
 
@@ -212,7 +230,10 @@ public class SettingsDialog extends Dialog<SettingsDialog.Result> {
             String resolvedSoundFont = soundFontText.isEmpty() ? null : soundFontText;
             String chosenInstrument = instrumentChoice.isDisabled() ? null : instrumentChoice.getValue();
             VelCurve chosenCurve = velocityChoice.getValue() == null ? VelCurve.LINEAR : velocityChoice.getValue();
-            return new Result(updated, resolvedSoundFont, chosenInstrument, chosenCurve);
+            int transpose = transposeSpinner.getValue();
+            MidiService.ReverbPreset chosenPreset =
+                    reverbChoice.getValue() == null ? MidiService.ReverbPreset.ROOM : reverbChoice.getValue();
+            return new Result(updated, resolvedSoundFont, chosenInstrument, chosenCurve, transpose, chosenPreset);
         });
     }
 
@@ -221,12 +242,21 @@ public class SettingsDialog extends Dialog<SettingsDialog.Result> {
         private final String soundFontPath;
         private final String instrumentName;
         private final VelCurve velocityCurve;
+        private final int transposeSemis;
+        private final MidiService.ReverbPreset reverbPreset;
 
-        Result(VideoSettings videoSettings, String soundFontPath, String instrumentName, VelCurve velocityCurve) {
+        Result(VideoSettings videoSettings,
+               String soundFontPath,
+               String instrumentName,
+               VelCurve velocityCurve,
+               int transposeSemis,
+               MidiService.ReverbPreset reverbPreset) {
             this.videoSettings = videoSettings;
             this.soundFontPath = soundFontPath;
             this.instrumentName = instrumentName;
             this.velocityCurve = velocityCurve;
+            this.transposeSemis = transposeSemis;
+            this.reverbPreset = reverbPreset;
         }
 
         public VideoSettings videoSettings() {
@@ -243,6 +273,14 @@ public class SettingsDialog extends Dialog<SettingsDialog.Result> {
 
         public VelCurve velocityCurve() {
             return velocityCurve;
+        }
+
+        public int transposeSemis() {
+            return transposeSemis;
+        }
+
+        public MidiService.ReverbPreset reverbPreset() {
+            return reverbPreset;
         }
     }
 
