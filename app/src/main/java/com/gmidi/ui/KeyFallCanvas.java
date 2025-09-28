@@ -12,26 +12,26 @@ import javafx.scene.transform.Affine;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Consumer;
+import java.util.function.DoubleConsumer;
 
 /**
- * Piano-roll style visualiser that renders falling rectangles for sustained notes. The canvas keeps
- * a pool of {@link NoteSprite} objects to avoid allocation pressure while the animation runs. The
- * drawing window is virtualised: only the most recent {@code windowSeconds} worth of notes is drawn
- * regardless of how long the performance has been running.
+ * Piano-roll style visualiser that renders Synthesia-like falling trails. Notes spawn slightly above
+ * the viewport, fall at a constant velocity, impact the keyboard line, and fade away after the
+ * impact flash has been triggered.
  */
 public class KeyFallCanvas extends Canvas {
 
     private static final long NANOS_PER_SECOND = 1_000_000_000L;
-    private static final double DEFAULT_WINDOW_SECONDS = 8.0;
-    private static final double MIN_WINDOW_SECONDS = 1.0;
-    private static final double FADE_SECONDS = 0.6;
-    private static final double MIN_NOTE_HEIGHT = 6.0;
-    private static final double NOTE_MARGIN = 32.0;
-    private static final Color BACKGROUND = Color.web("#101010");
+    private static final double FALL_SPEED_PX_PER_SEC = 600.0;
+    private static final double SPAWN_PAD_PX = 24.0;
+    private static final double IMPACT_FADE_MS = 160.0;
+    private static final double IMPACT_THRESHOLD_PX = 0.0;
+    private static final double NOTE_TRAIL_HEIGHT = 14.0;
     private static final Color NOTE_COLOR = Color.web("#2CE4D0");
+
     private static final int MIN_W = 640;
     private static final int MIN_H = 360;
     private static final int MAX_W = 3072;
@@ -39,10 +39,8 @@ public class KeyFallCanvas extends Canvas {
     private static final int STEP_W = 256;
     private static final int STEP_H = 144;
 
-    private final List<NoteSprite> sprites = new ArrayList<>();
-    private final Deque<NoteSprite> pool = new ArrayDeque<>();
-    @SuppressWarnings("unchecked")
-    private final Deque<NoteSprite>[] activePerNote = new Deque[128];
+    private final List<FallingNote> active = new ArrayList<>(256);
+    private final Deque<FallingNote> pool = new ArrayDeque<>(256);
 
     private Region boundViewport;
     private final InvalidationListener viewportBoundsListener = obs -> {
@@ -51,8 +49,6 @@ public class KeyFallCanvas extends Canvas {
         }
     };
 
-    private boolean sustainPedal;
-    private double windowSeconds = DEFAULT_WINDOW_SECONDS;
     private boolean renderRequested = true;
 
     /**
@@ -72,13 +68,12 @@ public class KeyFallCanvas extends Canvas {
     private boolean pendingApply;
     private AnimationTimer resizeCoalescer;
 
+    private Consumer<Integer> onImpact;
+
     public KeyFallCanvas() {
         super(1, 1);
         setFocusTraversable(false);
         setMouseTransparent(true);
-        for (int i = 0; i < activePerNote.length; i++) {
-            activePerNote[i] = new ArrayDeque<>();
-        }
     }
 
     /**
@@ -168,6 +163,10 @@ public class KeyFallCanvas extends Canvas {
         renderScaleX = canvasW / viewportWidth;
         renderScaleY = canvasH / viewportHeight;
 
+        for (FallingNote note : active) {
+            positionForMidi(note.midi, x -> note.x = x, w -> note.w = w);
+        }
+
         requestRender();
     }
 
@@ -192,108 +191,91 @@ public class KeyFallCanvas extends Canvas {
     }
 
     /**
-     * Sets how many seconds of note history should be visible on screen. Larger windows make notes
-     * appear to fall more slowly; smaller windows accelerate the animation.
-     */
-    public void setWindowSeconds(double seconds) {
-        if (seconds < MIN_WINDOW_SECONDS) {
-            seconds = MIN_WINDOW_SECONDS;
-        }
-        if (this.windowSeconds != seconds) {
-            this.windowSeconds = seconds;
-            requestRender();
-        }
-    }
-
-    /**
-     * Returns the number of seconds represented by the viewport.
-     */
-    public double getWindowSeconds() {
-        return windowSeconds;
-    }
-
-    /**
      * Registers a new note onset. Notes outside the MIDI range 0–127 are ignored.
      */
-    public void onNoteOn(int note, int velocity, long timestampNanos) {
-        if (note < 0 || note >= activePerNote.length) {
+    public void onNoteOn(int midi, int velocity, long tNanos) {
+        if (midi < 0 || midi >= 128) {
             return;
         }
-        NoteSprite sprite = pool.pollFirst();
-        if (sprite == null) {
-            sprite = new NoteSprite();
+        FallingNote note = pool.pollFirst();
+        if (note == null) {
+            note = new FallingNote();
         }
-        sprite.reset(note, velocity, timestampNanos);
-        sprites.add(sprite);
-        activePerNote[note].addLast(sprite);
+        note.midi = midi;
+        positionForMidi(midi, x -> note.x = x, w -> note.w = w);
+        note.spawnNanos = tNanos > 0 ? tNanos : System.nanoTime();
+        note.impacted = false;
+        note.impactNanos = 0;
+        active.add(note);
         requestRender();
     }
 
-    /**
-     * Marks a note as released. If the sustain pedal is held the note will continue to render until
-     * {@link #onSustain(boolean, long)} reports that the pedal was lifted.
-     */
-    public void onNoteOff(int note, long timestampNanos) {
-        if (note < 0 || note >= activePerNote.length) {
-            return;
-        }
-        Deque<NoteSprite> stack = activePerNote[note];
-        NoteSprite sprite = stack.peekLast();
-        if (sprite == null) {
-            return;
-        }
-        sprite.markReleased(sustainPedal, timestampNanos);
-        if (!sustainPedal) {
-            stack.removeLast();
-        }
-        requestRender();
+    public void onNoteOff(int midi, long tNanos) {
+        // The falling trail decouples visual state from note-off messages.
     }
 
-    /**
-     * Updates the sustain pedal state. When the pedal is released any notes that were waiting for
-     * sustain are marked as finished so they can fade out of the viewport.
-     */
-    public void onSustain(boolean pressed, long timestampNanos) {
-        sustainPedal = pressed;
-        if (!pressed) {
-            for (Deque<NoteSprite> stack : activePerNote) {
-                Iterator<NoteSprite> iterator = stack.iterator();
-                while (iterator.hasNext()) {
-                    NoteSprite sprite = iterator.next();
-                    if (sprite.isAwaitingSustainRelease()) {
-                        sprite.sustainReleased(timestampNanos);
-                        iterator.remove();
-                    }
-                }
-            }
-        }
-        requestRender();
+    public void onSustain(boolean down, long tNanos) {
+        // The visualiser ignores sustain; audio and keyboard state still honour it elsewhere.
     }
 
-    /**
-     * Clears all sprites and returns them to the pool. Invoked when a new recording session starts.
-     */
     public void clear() {
-        for (NoteSprite sprite : sprites) {
-            sprite.reset(0, 0, 0);
-            pool.addLast(sprite);
+        for (FallingNote note : active) {
+            pool.addLast(note);
         }
-        sprites.clear();
-        for (Deque<NoteSprite> stack : activePerNote) {
-            stack.clear();
-        }
+        active.clear();
         requestRender();
+    }
+
+    public void setOnImpact(Consumer<Integer> onImpact) {
+        this.onImpact = onImpact;
     }
 
     /**
      * Advances the animation to {@code nowNanos}. Drawing only happens when a repaint was requested
-     * or active sprites are visible so idle sessions remain inexpensive.
+     * or active trails are visible so idle sessions remain inexpensive.
      */
     public void tick(long nowNanos) {
         if (nowNanos <= 0) {
             nowNanos = System.nanoTime();
         }
-        if (!renderRequested && sprites.isEmpty()) {
+        if (viewportHeight <= 0 || viewportWidth <= 0) {
+            return;
+        }
+
+        final double dtScale = NANOS_PER_SECOND;
+        final double keyboardLine = viewportHeight;
+        boolean hasVisible = false;
+
+        for (int i = active.size() - 1; i >= 0; i--) {
+            FallingNote note = active.get(i);
+            double elapsed = Math.max(0, (nowNanos - note.spawnNanos) / dtScale);
+            double y = -SPAWN_PAD_PX + FALL_SPEED_PX_PER_SEC * elapsed;
+
+            if (!note.impacted && y >= keyboardLine - IMPACT_THRESHOLD_PX) {
+                note.impacted = true;
+                note.impactNanos = nowNanos;
+                if (onImpact != null) {
+                    onImpact.accept(note.midi);
+                }
+                y = keyboardLine;
+            }
+
+            if (note.impacted) {
+                double fadeMs = (nowNanos - note.impactNanos) / 1_000_000.0;
+                if (fadeMs >= IMPACT_FADE_MS) {
+                    active.remove(i);
+                    pool.addLast(note);
+                    continue;
+                }
+            } else if (y > keyboardLine + SPAWN_PAD_PX) {
+                active.remove(i);
+                pool.addLast(note);
+                continue;
+            }
+            hasVisible = true;
+        }
+
+        if (!renderRequested && !hasVisible) {
             return;
         }
         renderRequested = false;
@@ -301,139 +283,76 @@ public class KeyFallCanvas extends Canvas {
     }
 
     private void draw(long nowNanos) {
-        GraphicsContext gc = getGraphicsContext2D();
-        gc.setTransform(new Affine());
-        gc.clearRect(0, 0, canvasW, canvasH);
+        GraphicsContext g = getGraphicsContext2D();
+        g.setTransform(new Affine());
+        g.clearRect(0, 0, canvasW, canvasH);
 
-        double width = viewportWidth;
-        double height = viewportHeight;
-        if (width <= 0 || height <= 0 || !Double.isFinite(width) || !Double.isFinite(height)) {
+        if (viewportWidth <= 0 || viewportHeight <= 0) {
             return;
         }
 
-        gc.save();
-        gc.scale(renderScaleX, renderScaleY);
-        gc.setFill(BACKGROUND);
-        gc.fillRect(0, 0, width, height);
+        g.save();
+        g.scale(renderScaleX, renderScaleY);
+        g.setFill(NOTE_COLOR);
 
-        long windowNanos = (long) (windowSeconds * NANOS_PER_SECOND);
-        if (windowNanos <= 0) {
-            windowNanos = (long) (MIN_WINDOW_SECONDS * NANOS_PER_SECOND);
+        final double keyboardLine = viewportHeight;
+        for (FallingNote note : active) {
+            double elapsed = Math.max(0, (nowNanos - note.spawnNanos) / (double) NANOS_PER_SECOND);
+            double y = -SPAWN_PAD_PX + FALL_SPEED_PX_PER_SEC * elapsed;
+            double alpha = 1.0;
+
+            if (note.impacted) {
+                double fadeMs = (nowNanos - note.impactNanos) / 1_000_000.0;
+                alpha = Math.max(0.0, 1.0 - (fadeMs / IMPACT_FADE_MS));
+                y = keyboardLine;
+            } else {
+                y = Math.min(y, keyboardLine);
+            }
+
+            if (alpha <= 0.0) {
+                continue;
+            }
+
+            g.setGlobalAlpha(alpha);
+            g.fillRoundRect(note.x, y - NOTE_TRAIL_HEIGHT, note.w, NOTE_TRAIL_HEIGHT, 6, 6);
         }
-        long viewEnd = nowNanos;
-        long viewStart = viewEnd - windowNanos;
-        long fadeCutoff = viewStart - (long) (FADE_SECONDS * NANOS_PER_SECOND);
-        double pixelsPerNano = height / (double) windowNanos;
-        if (!Double.isFinite(pixelsPerNano) || pixelsPerNano <= 0) {
-            pixelsPerNano = 1.0 / NANOS_PER_SECOND;
-        }
-
-        Iterator<NoteSprite> iterator = sprites.iterator();
-        while (iterator.hasNext()) {
-            NoteSprite sprite = iterator.next();
-            if (sprite.onTimeNanos > viewEnd) {
-                continue;
-            }
-
-            long releaseTime = sprite.tailEndNanos >= 0 ? sprite.tailEndNanos : viewEnd;
-            if (sprite.tailEndNanos >= 0 && sprite.tailEndNanos < fadeCutoff) {
-                recycle(iterator, sprite);
-                continue;
-            }
-
-            long visibleEnd = Math.min(releaseTime, viewEnd);
-            long visibleStart = Math.max(sprite.onTimeNanos, viewStart);
-            if (visibleEnd < viewStart) {
-                recycle(iterator, sprite);
-                continue;
-            }
-
-            // Map timestamps to Y positions: newer events sit near the bottom of the viewport and
-            // older events move upwards until they leave the visible window.
-            double bottom = height - ((viewEnd - visibleEnd) * pixelsPerNano);
-            double top = height - ((viewEnd - visibleStart) * pixelsPerNano);
-            double noteHeight = bottom - top;
-            if (!Double.isFinite(noteHeight)) {
-                continue;
-            }
-            if (noteHeight < MIN_NOTE_HEIGHT) {
-                noteHeight = MIN_NOTE_HEIGHT;
-                top = bottom - noteHeight;
-            }
-            if (bottom < -NOTE_MARGIN) {
-                recycle(iterator, sprite);
-                continue;
-            }
-            if (top > height + NOTE_MARGIN) {
-                continue;
-            }
-
-            if (sprite.note < PianoKeyLayout.FIRST_MIDI_NOTE || sprite.note > PianoKeyLayout.LAST_MIDI_NOTE) {
-                continue;
-            }
-
-            double keyLeft = PianoKeyLayout.keyLeft(sprite.note, width);
-            double keyWidth = Math.max(6.0, PianoKeyLayout.keyWidth(sprite.note, width) * 0.82);
-
-            double velocityAlpha = 0.3 + (sprite.velocity / 127.0) * 0.7;
-            double fade = 1.0;
-            if (sprite.tailEndNanos >= 0) {
-                double fadeSeconds = (viewEnd - sprite.tailEndNanos) / (double) NANOS_PER_SECOND;
-                fade = Math.max(0.0, 1.0 - (fadeSeconds / FADE_SECONDS));
-                if (fade <= 0.01) {
-                    recycle(iterator, sprite);
-                    continue;
-                }
-            }
-            double alpha = Math.max(0.0, Math.min(1.0, velocityAlpha * fade));
-            gc.setFill(NOTE_COLOR.deriveColor(0, 1, 1, alpha));
-            gc.fillRoundRect(keyLeft, top, keyWidth, noteHeight, 12, 12);
-        }
-
-        gc.restore();
+        g.setGlobalAlpha(1.0);
+        g.restore();
     }
 
-    private void recycle(Iterator<NoteSprite> iterator, NoteSprite sprite) {
-        iterator.remove();
-        activePerNote[sprite.note].remove(sprite);
-        sprite.reset(0, 0, 0);
-        pool.addLast(sprite);
+    private void positionForMidi(int midi, DoubleConsumer setX, DoubleConsumer setW) {
+        double width = viewportWidth;
+        if (width <= 0) {
+            setX.accept(0);
+            setW.accept(0);
+            return;
+        }
+        if (midi >= PianoKeyLayout.FIRST_MIDI_NOTE && midi <= PianoKeyLayout.LAST_MIDI_NOTE) {
+            setX.accept(PianoKeyLayout.keyLeft(midi, width));
+            setW.accept(Math.max(6.0, PianoKeyLayout.keyWidth(midi, width)));
+            return;
+        }
+        double whiteWidth = width / PianoKeyLayout.whiteKeyCount();
+        double clampedWidth = Math.max(6.0, whiteWidth);
+        if (midi < PianoKeyLayout.FIRST_MIDI_NOTE) {
+            setX.accept(0.0);
+            setW.accept(clampedWidth);
+        } else {
+            setX.accept(Math.max(0.0, width - clampedWidth));
+            setW.accept(clampedWidth);
+        }
     }
 
     private void requestRender() {
         renderRequested = true;
     }
 
-    private static final class NoteSprite {
-        int note;
-        int velocity;
-        long onTimeNanos;
-        long tailEndNanos = -1;
-        boolean awaitingSustain;
-
-        void reset(int note, int velocity, long start) {
-            this.note = note;
-            this.velocity = velocity;
-            this.onTimeNanos = start;
-            this.tailEndNanos = -1;
-            this.awaitingSustain = false;
-        }
-
-        void markReleased(boolean sustainActive, long time) {
-            if (sustainActive) {
-                awaitingSustain = true;
-            } else {
-                tailEndNanos = time;
-            }
-        }
-
-        void sustainReleased(long time) {
-            tailEndNanos = time;
-            awaitingSustain = false;
-        }
-
-        boolean isAwaitingSustainRelease() {
-            return awaitingSustain;
-        }
+    private static final class FallingNote {
+        int midi;
+        double x;
+        double w;
+        long spawnNanos;
+        boolean impacted;
+        long impactNanos;
     }
 }
