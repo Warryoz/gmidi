@@ -95,6 +95,8 @@ public class SessionController {
         this.statusLabel = statusLabel;
         this.progressBar = progressBar;
 
+        this.keyFallCanvas.setOnImpact(keyboardView::flash);
+
         deviceCombo.setOnAction(e -> connectToSelectedDevice());
         midiRecordToggle.selectedProperty().addListener((obs, oldV, recording) -> {
             if (recording) {

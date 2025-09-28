@@ -1,5 +1,6 @@
 package com.gmidi.ui;
 
+import javafx.animation.AnimationTimer;
 import javafx.geometry.Insets;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
@@ -18,10 +19,26 @@ import java.util.Map;
  */
 public class KeyboardView extends Region {
 
+    private static final double FLASH_DURATION_MS = 120.0;
+    private static final Color FLASH_COLOR = Color.web("#2CE4D0");
+
     private final Canvas canvas = new Canvas(800, 120);
     private final boolean[] pressed = new boolean[128];
+    private final long[] flashStartNanos = new long[128];
+    private boolean flashTimerActive;
+    private final AnimationTimer flashTimer = new AnimationTimer() {
+        @Override
+        public void handle(long now) {
+            if (!redraw(now)) {
+                stop();
+                flashTimerActive = false;
+            }
+        }
+    };
+
     private final Map<Integer, Tooltip> tooltips = new HashMap<>();
     private Tooltip activeTooltip;
+    private boolean flashActiveDuringDraw;
 
     public KeyboardView() {
         getStyleClass().add("keyboard-view");
@@ -49,6 +66,22 @@ public class KeyboardView extends Region {
         }
         pressed[midiNote] = false;
         redraw();
+    }
+
+    public void flash(int midiNote) {
+        if (midiNote < 0 || midiNote >= flashStartNanos.length) {
+            return;
+        }
+        flashStartNanos[midiNote] = System.nanoTime();
+        ensureFlashTimer();
+        redraw();
+    }
+
+    private void ensureFlashTimer() {
+        if (!flashTimerActive) {
+            flashTimer.start();
+            flashTimerActive = true;
+        }
     }
 
     private void handleHover(MouseEvent event, boolean inside) {
@@ -97,19 +130,30 @@ public class KeyboardView extends Region {
     }
 
     private void redraw() {
+        redraw(System.nanoTime());
+    }
+
+    private boolean redraw(long nowNanos) {
         double width = canvas.getWidth();
         double height = canvas.getHeight();
         if (width <= 0 || height <= 0) {
-            return;
+            return false;
         }
         GraphicsContext gc = canvas.getGraphicsContext2D();
         gc.clearRect(0, 0, width, height);
 
-        drawWhiteKeys(gc, width, height);
-        drawBlackKeys(gc, width, height);
+        flashActiveDuringDraw = false;
+        drawWhiteKeys(gc, width, height, nowNanos);
+        drawBlackKeys(gc, width, height, nowNanos);
+
+        if (!flashActiveDuringDraw && flashTimerActive) {
+            flashTimer.stop();
+            flashTimerActive = false;
+        }
+        return flashActiveDuringDraw;
     }
 
-    private void drawWhiteKeys(GraphicsContext gc, double width, double height) {
+    private void drawWhiteKeys(GraphicsContext gc, double width, double height, long nowNanos) {
         double whiteKeyHeight = height;
         Color base = Color.web("#F0F0F0");
         Color pressedColor = Color.web("#2CE4D0", 0.55);
@@ -127,13 +171,18 @@ public class KeyboardView extends Region {
                 gc.setFill(pressedColor);
                 gc.fillRoundRect(keyLeft + 2, 2, keyWidth - 4, whiteKeyHeight - 4, 10, 10);
             }
+            double flashAlpha = computeFlashAlpha(note, nowNanos);
+            if (flashAlpha > 0) {
+                gc.setFill(FLASH_COLOR.deriveColor(0, 1, 1, flashAlpha));
+                gc.fillRoundRect(keyLeft + 2, 2, keyWidth - 4, whiteKeyHeight - 4, 10, 10);
+            }
             gc.setStroke(border);
             gc.setLineWidth(1.25);
             gc.strokeRoundRect(keyLeft, 0, keyWidth, whiteKeyHeight, 12, 12);
         }
     }
 
-    private void drawBlackKeys(GraphicsContext gc, double width, double height) {
+    private void drawBlackKeys(GraphicsContext gc, double width, double height, long nowNanos) {
         double blackKeyHeight = height * 0.62;
         Color base = Color.web("#1E1E1E");
         Color highlight = Color.web("#2CE4D0");
@@ -144,11 +193,31 @@ public class KeyboardView extends Region {
             }
             double keyLeft = PianoKeyLayout.keyLeft(note, width);
             double keyWidth = PianoKeyLayout.keyWidth(note, width);
-            gc.setFill(pressed[note] ? highlight : base);
+            boolean isPressed = pressed[note];
+            gc.setFill(isPressed ? highlight : base);
             gc.fillRoundRect(keyLeft, 0, keyWidth, blackKeyHeight, 8, 8);
+            double flashAlpha = computeFlashAlpha(note, nowNanos);
+            if (flashAlpha > 0) {
+                gc.setFill(FLASH_COLOR.deriveColor(0, 1, 1, flashAlpha));
+                gc.fillRoundRect(keyLeft, 0, keyWidth, blackKeyHeight, 8, 8);
+            }
             gc.setStroke(Color.web("#101010"));
             gc.setLineWidth(1);
             gc.strokeRoundRect(keyLeft, 0, keyWidth, blackKeyHeight, 8, 8);
         }
+    }
+
+    private double computeFlashAlpha(int midiNote, long nowNanos) {
+        long start = flashStartNanos[midiNote];
+        if (start == 0) {
+            return 0;
+        }
+        double elapsedMs = (nowNanos - start) / 1_000_000.0;
+        if (elapsedMs >= FLASH_DURATION_MS) {
+            flashStartNanos[midiNote] = 0;
+            return 0;
+        }
+        flashActiveDuringDraw = true;
+        return 1.0 - (elapsedMs / FLASH_DURATION_MS);
     }
 }
