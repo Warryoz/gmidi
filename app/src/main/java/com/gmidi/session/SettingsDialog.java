@@ -16,6 +16,7 @@ import javafx.scene.control.TextField;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.Priority;
 import javafx.stage.DirectoryChooser;
+import javafx.stage.FileChooser;
 import javafx.stage.Window;
 
 import java.io.BufferedReader;
@@ -26,6 +27,7 @@ import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -34,11 +36,11 @@ import java.util.concurrent.atomic.AtomicLong;
  * Modal dialog that exposes basic encoder configuration such as resolution, FPS, preset, and output
  * directory.
  */
-public class SettingsDialog extends Dialog<VideoSettings> {
+public class SettingsDialog extends Dialog<SettingsDialog.Result> {
 
     private final AtomicLong ffmpegProbeCounter = new AtomicLong();
 
-    public SettingsDialog(VideoSettings current, Node owner) {
+    public SettingsDialog(VideoSettings current, String currentSoundFont, Node owner) {
         setTitle("Recorder Settings");
         getDialogPane().getButtonTypes().addAll(ButtonType.CANCEL, ButtonType.OK);
         getDialogPane().getStyleClass().add("settings-dialog");
@@ -99,6 +101,28 @@ public class SettingsDialog extends Dialog<VideoSettings> {
         presetChoice.setValue(current.getPreset());
 
         TextField crfField = new TextField(Integer.toString(current.getCrf()));
+        TextField soundFontField = new TextField(currentSoundFont == null ? "" : currentSoundFont);
+        soundFontField.setPrefColumnCount(24);
+        soundFontField.setPromptText("Optional: path to SoundFont (.sf2)");
+        Button soundFontBrowse = new Button("Browse…");
+        soundFontBrowse.getStyleClass().add("accent-button");
+        soundFontBrowse.setOnAction(evt -> {
+            FileChooser chooser = new FileChooser();
+            chooser.setTitle("Select SoundFont");
+            chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("SoundFont", "*.sf2"));
+            String currentText = soundFontField.getText();
+            if (currentText != null && !currentText.isBlank()) {
+                File existing = new File(currentText);
+                if (existing.getParentFile() != null && existing.getParentFile().isDirectory()) {
+                    chooser.setInitialDirectory(existing.getParentFile());
+                }
+            }
+            Window window = owner != null && owner.getScene() != null ? owner.getScene().getWindow() : getOwner();
+            File chosen = chooser.showOpenDialog(window);
+            if (chosen != null) {
+                soundFontField.setText(chosen.getAbsolutePath());
+            }
+        });
         TextField ffmpegField = new TextField(current.getFfmpegExecutable() == null
                 ? ""
                 : current.getFfmpegExecutable().toString());
@@ -112,8 +136,10 @@ public class SettingsDialog extends Dialog<VideoSettings> {
         grid.addRow(2, new Label("Resolution"), resolutionChoice);
         grid.addRow(3, new Label("x264 preset"), presetChoice);
         grid.addRow(4, new Label("CRF"), crfField);
-        grid.addRow(5, new Label("FFmpeg path"), ffmpegField);
-        grid.add(ffmpegStatus, 1, 6, 2, 1);
+        grid.addRow(5, new Label("SoundFont"), soundFontField, soundFontBrowse);
+        GridPane.setHgrow(soundFontField, Priority.ALWAYS);
+        grid.addRow(6, new Label("FFmpeg path"), ffmpegField);
+        grid.add(ffmpegStatus, 1, 7, 2, 1);
 
         getDialogPane().setContent(grid);
 
@@ -152,8 +178,28 @@ public class SettingsDialog extends Dialog<VideoSettings> {
                     updated.setFfmpegExecutable(current.getFfmpegExecutable());
                 }
             }
-            return updated;
+            String soundFontText = soundFontField.getText().trim();
+            String resolvedSoundFont = soundFontText.isEmpty() ? null : soundFontText;
+            return new Result(updated, resolvedSoundFont);
         });
+    }
+
+    public static final class Result {
+        private final VideoSettings videoSettings;
+        private final String soundFontPath;
+
+        Result(VideoSettings videoSettings, String soundFontPath) {
+            this.videoSettings = videoSettings;
+            this.soundFontPath = soundFontPath;
+        }
+
+        public VideoSettings videoSettings() {
+            return videoSettings;
+        }
+
+        public Optional<String> soundFontPath() {
+            return Optional.ofNullable(soundFontPath);
+        }
     }
 
     private void updateFfmpegStatus(String override, Label statusLabel) {

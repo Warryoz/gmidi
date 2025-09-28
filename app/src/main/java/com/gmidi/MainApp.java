@@ -11,6 +11,7 @@ import javafx.scene.control.Button;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressBar;
+import javafx.scene.control.Slider;
 import javafx.scene.control.ToggleButton;
 import javafx.scene.control.Tooltip;
 import javafx.scene.layout.BorderPane;
@@ -67,6 +68,21 @@ public class MainApp extends Application {
         Label fpsLabel = new Label("60.0 FPS");
         fpsLabel.getStyleClass().add("info-label");
 
+        Label fallDurationLabel = new Label("Fall: 10.0s");
+        fallDurationLabel.getStyleClass().add("info-label");
+        Slider fallDurationSlider = new Slider(3.0, 20.0, 10.0);
+        fallDurationSlider.setPrefWidth(180);
+        fallDurationSlider.setBlockIncrement(0.5);
+        fallDurationSlider.setShowTickMarks(false);
+
+        Button replayPlayButton = new Button("Play");
+        replayPlayButton.getStyleClass().add("accent-button");
+        Tooltip.install(replayPlayButton, new Tooltip("Replay last recording"));
+
+        Button replayStopButton = new Button("Stop");
+        replayStopButton.getStyleClass().add("accent-button");
+        Tooltip.install(replayStopButton, new Tooltip("Stop playback"));
+
         Button settingsButton = new Button("⚙");
         settingsButton.getStyleClass().add("icon-button");
         Tooltip.install(settingsButton, new Tooltip("Open settings"));
@@ -75,7 +91,20 @@ public class MainApp extends Application {
         darkToggle.setSelected(true);
         darkToggle.getStyleClass().add("mode-toggle");
 
-        HBox toolbar = new HBox(10, deviceCombo, refreshButton, midiRecordToggle, videoRecordToggle, fpsLabel, settingsButton, darkToggle);
+        HBox fallControls = new HBox(6, fallDurationLabel, fallDurationSlider);
+        fallControls.getStyleClass().add("inline-group");
+
+        HBox toolbar = new HBox(10,
+                deviceCombo,
+                refreshButton,
+                midiRecordToggle,
+                videoRecordToggle,
+                fpsLabel,
+                fallControls,
+                replayPlayButton,
+                replayStopButton,
+                settingsButton,
+                darkToggle);
         toolbar.setPadding(new Insets(16, 18, 12, 18));
         toolbar.getStyleClass().add("toolbar");
 
@@ -139,7 +168,11 @@ public class MainApp extends Application {
                 framesLabel,
                 droppedLabel,
                 statusLabel,
-                progressBar
+                progressBar,
+                fallDurationSlider,
+                fallDurationLabel,
+                replayPlayButton,
+                replayStopButton
         );
         refreshButton.setOnAction(e -> controller.refreshMidiInputs());
         settingsButton.setOnAction(e -> controller.showSettingsDialog(settingsButton));

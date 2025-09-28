@@ -25,7 +25,6 @@ import java.util.function.DoubleConsumer;
 public class KeyFallCanvas extends Canvas {
 
     private static final long NANOS_PER_SECOND = 1_000_000_000L;
-    private static final double FALL_SPEED_PX_PER_SEC = 600.0;
     private static final double SPAWN_PAD_PX = 24.0;
     private static final double IMPACT_FADE_MS = 160.0;
     private static final double IMPACT_THRESHOLD_PX = 0.0;
@@ -63,6 +62,9 @@ public class KeyFallCanvas extends Canvas {
     private double viewportWidth = MIN_W;
     private double viewportHeight = MIN_H;
 
+    private double fallDurationSeconds = 10.0;
+    private double fallSpeedPxPerSec = 600.0;
+
     private double pendingViewportWidth = MIN_W;
     private double pendingViewportHeight = MIN_H;
     private boolean pendingApply;
@@ -92,6 +94,15 @@ public class KeyFallCanvas extends Canvas {
         boundViewport = viewport;
         boundViewport.layoutBoundsProperty().addListener(viewportBoundsListener);
         scheduleViewportApply(boundViewport.getLayoutBounds());
+    }
+
+    public double getFallDurationSeconds() {
+        return fallDurationSeconds;
+    }
+
+    public void setFallDurationSeconds(double seconds) {
+        fallDurationSeconds = Math.max(1.0, seconds);
+        recomputeFallSpeed();
     }
 
     public void unbindViewport() {
@@ -148,6 +159,7 @@ public class KeyFallCanvas extends Canvas {
 
         viewportWidth = vw;
         viewportHeight = vh;
+        recomputeFallSpeed();
 
         int targetW = bucket((int) Math.round(vw), STEP_W, MIN_W, MAX_W);
         int targetH = bucket((int) Math.round(vh), STEP_H, MIN_H, MAX_H);
@@ -168,6 +180,15 @@ public class KeyFallCanvas extends Canvas {
         }
 
         requestRender();
+    }
+
+    private void recomputeFallSpeed() {
+        double travelDistance = viewportHeight + SPAWN_PAD_PX;
+        if (fallDurationSeconds <= 0) {
+            fallSpeedPxPerSec = 600.0;
+            return;
+        }
+        fallSpeedPxPerSec = travelDistance / fallDurationSeconds;
     }
 
     private static double clamp(double value, double min, double max) {
@@ -249,7 +270,7 @@ public class KeyFallCanvas extends Canvas {
         for (int i = active.size() - 1; i >= 0; i--) {
             FallingNote note = active.get(i);
             double elapsed = Math.max(0, (nowNanos - note.spawnNanos) / dtScale);
-            double y = -SPAWN_PAD_PX + FALL_SPEED_PX_PER_SEC * elapsed;
+            double y = -SPAWN_PAD_PX + fallSpeedPxPerSec * elapsed;
 
             if (!note.impacted && y >= keyboardLine - IMPACT_THRESHOLD_PX) {
                 note.impacted = true;
@@ -298,7 +319,7 @@ public class KeyFallCanvas extends Canvas {
         final double keyboardLine = viewportHeight;
         for (FallingNote note : active) {
             double elapsed = Math.max(0, (nowNanos - note.spawnNanos) / (double) NANOS_PER_SECOND);
-            double y = -SPAWN_PAD_PX + FALL_SPEED_PX_PER_SEC * elapsed;
+            double y = -SPAWN_PAD_PX + fallSpeedPxPerSec * elapsed;
             double alpha = 1.0;
 
             if (note.impacted) {

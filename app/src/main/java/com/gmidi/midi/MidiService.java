@@ -1,13 +1,18 @@
 package com.gmidi.midi;
 
+import javax.sound.midi.InvalidMidiDataException;
+import javax.sound.midi.MetaMessage;
 import javax.sound.midi.MidiDevice;
 import javax.sound.midi.MidiMessage;
 import javax.sound.midi.MidiSystem;
 import javax.sound.midi.MidiUnavailableException;
 import javax.sound.midi.Receiver;
 import javax.sound.midi.ShortMessage;
+import javax.sound.midi.Soundbank;
+import javax.sound.midi.Synthesizer;
 import javax.sound.midi.Transmitter;
-import javax.sound.midi.MetaMessage;
+import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -23,6 +28,10 @@ public class MidiService {
     private MidiDevice currentDevice;
     private Transmitter currentTransmitter;
     private MidiInput currentInput;
+    private Synthesizer synthesizer;
+    private Receiver synthReceiver;
+    private Soundbank customSoundbank;
+    private String currentSoundFontPath;
 
     public List<MidiInput> listInputs() throws MidiUnavailableException {
         List<MidiInput> result = new ArrayList<>();
@@ -82,6 +91,51 @@ public class MidiService {
         listeners.remove(listener);
     }
 
+    public synchronized Synthesizer ensureSynth(String soundFontPath)
+            throws MidiUnavailableException, InvalidMidiDataException, IOException {
+        if (synthesizer == null) {
+            synthesizer = MidiSystem.getSynthesizer();
+            synthesizer.open();
+            synthReceiver = synthesizer.getReceiver();
+            Soundbank defaultBank = synthesizer.getDefaultSoundbank();
+            if (defaultBank != null) {
+                synthesizer.loadAllInstruments(defaultBank);
+            }
+        }
+        String normalized = (soundFontPath != null && !soundFontPath.isBlank()) ? soundFontPath : null;
+        if (!Objects.equals(currentSoundFontPath, normalized)) {
+            applySoundFont(normalized);
+        }
+        return synthesizer;
+    }
+
+    public synchronized void reloadSoundFont(String soundFontPath)
+            throws MidiUnavailableException, InvalidMidiDataException, IOException {
+        ensureSynth(soundFontPath);
+    }
+
+    public synchronized Synthesizer getSynthesizer() {
+        return synthesizer;
+    }
+
+    public synchronized String getCurrentSoundFontPath() {
+        return currentSoundFontPath;
+    }
+
+    public synchronized void shutdown() {
+        close();
+        if (synthReceiver != null) {
+            synthReceiver.close();
+            synthReceiver = null;
+        }
+        if (synthesizer != null && synthesizer.isOpen()) {
+            synthesizer.close();
+        }
+        synthesizer = null;
+        customSoundbank = null;
+        currentSoundFontPath = null;
+    }
+
     private void publishNoteOn(int note, int velocity, long nanoTime) {
         for (MidiMessageListener listener : listeners) {
             listener.onNoteOn(note, velocity, nanoTime);
@@ -106,6 +160,67 @@ public class MidiService {
         }
     }
 
+    private void applySoundFont(String soundFontPath) throws InvalidMidiDataException, IOException {
+        if (synthesizer == null) {
+            return;
+        }
+        if (soundFontPath == null) {
+            if (customSoundbank != null) {
+                synthesizer.unloadAllInstruments(customSoundbank);
+            }
+            customSoundbank = null;
+            currentSoundFontPath = null;
+            return;
+        }
+        File file = new File(soundFontPath);
+        if (!file.isFile()) {
+            throw new IOException("SoundFont not found: " + file.getAbsolutePath());
+        }
+        Soundbank soundbank = MidiSystem.getSoundbank(file);
+        if (soundbank == null) {
+            throw new IOException("Unsupported SoundFont: " + file.getAbsolutePath());
+        }
+        Soundbank previous = customSoundbank;
+        String previousPath = currentSoundFontPath;
+        if (previous != null) {
+            synthesizer.unloadAllInstruments(previous);
+        }
+        boolean loaded;
+        try {
+            loaded = synthesizer.loadAllInstruments(soundbank);
+        } catch (RuntimeException ex) {
+            if (previous != null) {
+                synthesizer.loadAllInstruments(previous);
+                customSoundbank = previous;
+                currentSoundFontPath = previousPath;
+            } else {
+                customSoundbank = null;
+                currentSoundFontPath = null;
+            }
+            throw ex;
+        }
+        if (!loaded) {
+            if (previous != null) {
+                synthesizer.loadAllInstruments(previous);
+                customSoundbank = previous;
+                currentSoundFontPath = previousPath;
+            } else {
+                customSoundbank = null;
+                currentSoundFontPath = null;
+            }
+            throw new IOException("Unable to load SoundFont: " + file.getAbsolutePath());
+        }
+        customSoundbank = soundbank;
+        currentSoundFontPath = soundFontPath;
+    }
+
+    private void sendToSynth(MidiMessage message) {
+        Receiver receiver = synthReceiver;
+        if (receiver != null) {
+            receiver.send(message, -1);
+        }
+    }
+
     private final class DispatchingReceiver implements Receiver {
 
         @Override
@@ -119,6 +234,7 @@ public class MidiService {
         }
 
         private void handleShortMessage(ShortMessage shortMessage, long now) {
+            sendToSynth(shortMessage);
             switch (shortMessage.getCommand()) {
                 case ShortMessage.NOTE_ON -> {
                     int velocity = shortMessage.getData2();
