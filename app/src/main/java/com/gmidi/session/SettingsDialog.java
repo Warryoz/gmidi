@@ -181,8 +181,24 @@ public class SettingsDialog extends Dialog<VideoSettings> {
     }
 
     private ProbeResult probeFfmpeg(String override) {
-        String effective = FfmpegLocator.effectiveExecutable(override.isEmpty() ? null : override);
-        ProcessBuilder builder = new ProcessBuilder(effective, "-version");
+        String executable;
+        if (!override.isEmpty()) {
+            Path configured;
+            try {
+                configured = Paths.get(override);
+            } catch (InvalidPathException ex) {
+                return new ProbeResult(false, "Invalid FFmpeg path: " + ex.getInput());
+            }
+            try {
+                executable = FfmpegLocator.normalizeConfigured(configured);
+            } catch (IOException ex) {
+                return new ProbeResult(false, ex.getMessage());
+            }
+        } else {
+            executable = FfmpegLocator.defaultExecutable();
+        }
+
+        ProcessBuilder builder = new ProcessBuilder(executable, "-version");
         builder.redirectErrorStream(true);
         Process process = null;
         try {
@@ -198,16 +214,16 @@ public class SettingsDialog extends Dialog<VideoSettings> {
             }
             if (!process.waitFor(3, TimeUnit.SECONDS)) {
                 process.destroyForcibly();
-                return new ProbeResult(false, "Timed out probing " + effective);
+                return new ProbeResult(false, "Timed out probing " + executable);
             }
             int exit = process.exitValue();
             if (exit == 0) {
                 String detail = versionLine != null ? versionLine : "version check succeeded";
-                return new ProbeResult(true, effective + " (" + detail + ")");
+                return new ProbeResult(true, executable + " (" + detail + ")");
             }
-            return new ProbeResult(false, "ffmpeg exited with code " + exit + " when probing " + effective);
+            return new ProbeResult(false, "ffmpeg exited with code " + exit + " when probing " + executable);
         } catch (IOException ex) {
-            return new ProbeResult(false, "Unable to run " + effective + ": " + ex.getMessage());
+            return new ProbeResult(false, "Unable to run " + executable + ": " + ex.getMessage());
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
             return new ProbeResult(false, "Probe interrupted");

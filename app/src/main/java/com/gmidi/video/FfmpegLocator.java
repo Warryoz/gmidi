@@ -22,16 +22,25 @@ public final class FfmpegLocator {
         Objects.requireNonNull(settings, "settings");
         Path configured = settings.getFfmpegExecutable();
         if (configured != null) {
-            Path normalised = configured.toAbsolutePath().normalize();
-            if (!Files.isRegularFile(normalised)) {
-                throw new IOException("Configured FFmpeg path is not a file: " + normalised);
-            }
-            if (!Files.isExecutable(normalised)) {
-                throw new IOException("Configured FFmpeg path is not executable: " + normalised);
-            }
-            return normalised.toString();
+            return normalizeConfigured(configured);
         }
 
+        return defaultExecutable();
+    }
+
+    public static String normalizeConfigured(Path configured) throws IOException {
+        Objects.requireNonNull(configured, "configured");
+        Path normalised = configured.toAbsolutePath().normalize();
+        if (!Files.isRegularFile(normalised)) {
+            throw new IOException("Configured FFmpeg path is not a file: " + normalised);
+        }
+        if (!Files.isExecutable(normalised)) {
+            throw new IOException("Configured FFmpeg path is not executable: " + normalised);
+        }
+        return normalised.toString();
+    }
+
+    public static String defaultExecutable() {
         String windowsDefault = windowsChocolateyExecutable();
         if (windowsDefault != null) {
             return windowsDefault;
@@ -43,20 +52,6 @@ public final class FfmpegLocator {
         }
 
         return "ffmpeg";
-    }
-
-    public static String effectiveExecutable(String configured) {
-        if (configured != null && !configured.isBlank()) {
-            try {
-                Path candidate = Paths.get(configured.trim());
-                if (Files.isRegularFile(candidate)) {
-                    return candidate.toAbsolutePath().toString();
-                }
-            } catch (InvalidPathException ignored) {
-            }
-        }
-        String windowsDefault = windowsChocolateyExecutable();
-        return windowsDefault != null ? windowsDefault : "ffmpeg";
     }
 
     public static String locateOnPath() {
