@@ -7,6 +7,7 @@ import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
 import javafx.scene.layout.Region;
 import javafx.scene.paint.Color;
+import javafx.scene.transform.Affine;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -31,10 +32,12 @@ public class KeyFallCanvas extends Canvas {
     private static final double NOTE_MARGIN = 32.0;
     private static final Color BACKGROUND = Color.web("#101010");
     private static final Color NOTE_COLOR = Color.web("#2CE4D0");
-    private static final int MIN_W = 320;
-    private static final int MIN_H = 180;
-    private static final int MAX_W = 4096;
-    private static final int MAX_H = 4096;
+    private static final int MIN_W = 640;
+    private static final int MIN_H = 360;
+    private static final int MAX_W = 3072;
+    private static final int MAX_H = 2048;
+    private static final int STEP_W = 256;
+    private static final int STEP_H = 144;
 
     private final List<NoteSprite> sprites = new ArrayList<>();
     private final Deque<NoteSprite> pool = new ArrayDeque<>();
@@ -116,8 +119,8 @@ public class KeyFallCanvas extends Canvas {
         if (bounds == null) {
             return;
         }
-        double width = Math.max(MIN_W, bounds.getWidth());
-        double height = Math.max(MIN_H, bounds.getHeight());
+        double width = Math.max(1.0, bounds.getWidth());
+        double height = Math.max(1.0, bounds.getHeight());
         if (!Double.isFinite(width) || !Double.isFinite(height)) {
             return;
         }
@@ -142,8 +145,8 @@ public class KeyFallCanvas extends Canvas {
     }
 
     private void applyBoundsOnce(double viewportW, double viewportH) {
-        double vw = Math.max(MIN_W, viewportW);
-        double vh = Math.max(MIN_H, viewportH);
+        double vw = clamp(viewportW, MIN_W, MAX_W * 1.25);
+        double vh = clamp(viewportH, MIN_H, MAX_H * 1.25);
         if (!Double.isFinite(vw) || !Double.isFinite(vh)) {
             return;
         }
@@ -151,11 +154,8 @@ public class KeyFallCanvas extends Canvas {
         viewportWidth = vw;
         viewportHeight = vh;
 
-        int targetW = (int) Math.min(MAX_W, Math.round(vw));
-        int targetH = (int) Math.min(MAX_H, Math.round(vh));
-        targetW = Math.max(MIN_W, targetW);
-        targetH = Math.max(MIN_H, targetH);
-
+        int targetW = bucket((int) Math.round(vw), STEP_W, MIN_W, MAX_W);
+        int targetH = bucket((int) Math.round(vh), STEP_H, MIN_H, MAX_H);
         if (targetW != canvasW || targetH != canvasH) {
             canvasW = targetW;
             canvasH = targetH;
@@ -163,13 +163,32 @@ public class KeyFallCanvas extends Canvas {
             setHeight(canvasH);
         }
 
-        // Rendering happens in viewport coordinates – the scale simply maps that space to the
-        // allocated canvas pixels so visual content never stretches even if the backing size is
-        // clamped.
-        renderScaleX = canvasW / vw;
-        renderScaleY = canvasH / vh;
+        // Rendering happens in viewport coordinates; scaling maps that logical space to the
+        // allocated backing pixels so the visual content adapts without thrashing RT textures.
+        renderScaleX = canvasW / viewportWidth;
+        renderScaleY = canvasH / viewportHeight;
 
         requestRender();
+    }
+
+    private static double clamp(double value, double min, double max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    /**
+     * Snaps the requested backing dimension to a multiple of {@code step}. The clamp keeps the
+     * texture size inside a conservative range so we only pay for reallocations when the viewport
+     * crosses a coarse bucket.
+     */
+    private static int bucket(int value, int step, int min, int max) {
+        int snapped = ((value + step / 2) / step) * step;
+        if (snapped < min) {
+            return min;
+        }
+        if (snapped > max) {
+            return max;
+        }
+        return snapped;
     }
 
     /**
@@ -283,18 +302,16 @@ public class KeyFallCanvas extends Canvas {
 
     private void draw(long nowNanos) {
         GraphicsContext gc = getGraphicsContext2D();
-        double pixelWidth = Math.max(1.0, getWidth());
-        double pixelHeight = Math.max(1.0, getHeight());
-        gc.save();
-        gc.clearRect(0, 0, pixelWidth, pixelHeight);
+        gc.setTransform(new Affine());
+        gc.clearRect(0, 0, canvasW, canvasH);
 
-        double width = Math.max(MIN_W, viewportWidth);
-        double height = Math.max(MIN_H, viewportHeight);
-        if (!Double.isFinite(width) || !Double.isFinite(height)) {
-            gc.restore();
+        double width = viewportWidth;
+        double height = viewportHeight;
+        if (width <= 0 || height <= 0 || !Double.isFinite(width) || !Double.isFinite(height)) {
             return;
         }
 
+        gc.save();
         gc.scale(renderScaleX, renderScaleY);
         gc.setFill(BACKGROUND);
         gc.fillRect(0, 0, width, height);

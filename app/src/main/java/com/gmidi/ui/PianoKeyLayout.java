@@ -15,9 +15,12 @@ public final class PianoKeyLayout {
     private static final int[] WHITE_KEY_INDEX = new int[128];
     private static final double BLACK_KEY_WIDTH_RATIO = 0.62;
     private static final int WHITE_KEY_COUNT;
+    private static final int[] ALL_NOTES;
 
     static {
         int whiteCounter = 0;
+        ALL_NOTES = new int[KEY_COUNT];
+        int arrayIndex = 0;
         for (int note = FIRST_MIDI_NOTE; note <= LAST_MIDI_NOTE; note++) {
             boolean isWhite = isNatural(note);
             WHITE_KEY[note] = isWhite;
@@ -25,6 +28,7 @@ public final class PianoKeyLayout {
             if (isWhite) {
                 whiteCounter++;
             }
+            ALL_NOTES[arrayIndex++] = note;
         }
         WHITE_KEY_COUNT = whiteCounter;
     }
@@ -86,11 +90,6 @@ public final class PianoKeyLayout {
     }
 
     public static int[] allNotes() {
-        int[] notes = new int[KEY_COUNT];
-        int index = 0;
-        for (int note = FIRST_MIDI_NOTE; note <= LAST_MIDI_NOTE; note++) {
-            notes[index++] = note;
-        }
-        return notes;
+        return ALL_NOTES;
     }
 }

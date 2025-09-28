@@ -27,6 +27,7 @@ public class KeyboardView extends Region {
         getStyleClass().add("keyboard-view");
         getChildren().add(canvas);
         setPadding(new Insets(12, 16, 12, 16));
+        setMaxWidth(Double.MAX_VALUE);
         setMinHeight(120);
         setPrefHeight(160);
         setMaxHeight(200);
@@ -87,8 +88,8 @@ public class KeyboardView extends Region {
     @Override
     protected void layoutChildren() {
         Insets padding = getPadding();
-        double contentWidth = Math.max(200, getWidth() - padding.getLeft() - padding.getRight());
-        double contentHeight = Math.max(60, getHeight() - padding.getTop() - padding.getBottom());
+        double contentWidth = Math.max(1, getWidth() - padding.getLeft() - padding.getRight());
+        double contentHeight = Math.max(1, getHeight() - padding.getTop() - padding.getBottom());
         canvas.setWidth(contentWidth);
         canvas.setHeight(contentHeight);
         canvas.relocate(padding.getLeft(), padding.getTop());
