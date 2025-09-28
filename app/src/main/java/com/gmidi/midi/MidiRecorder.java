@@ -4,6 +4,7 @@ import javax.sound.midi.InvalidMidiDataException;
 import javax.sound.midi.MetaMessage;
 import javax.sound.midi.MidiEvent;
 import javax.sound.midi.MidiSystem;
+import javax.sound.midi.MidiMessage;
 import javax.sound.midi.Sequence;
 import javax.sound.midi.ShortMessage;
 import javax.sound.midi.Track;
@@ -14,6 +15,9 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 /**
  * Persists incoming MIDI events into a Standard MIDI File. The recorder tracks real-time microsecond
@@ -22,7 +26,7 @@ import java.time.format.DateTimeFormatter;
  */
 public class MidiRecorder {
 
-    private static final int PPQ = 960;
+    public static final int PPQ = 960;
     private static final int DEFAULT_TEMPO_US = 500_000; // 120 BPM
     private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ISO_OFFSET_DATE_TIME;
 
@@ -34,6 +38,8 @@ public class MidiRecorder {
     private long lastTick;
     private int currentTempoUs = DEFAULT_TEMPO_US;
     private Path outputFile;
+    private final List<Event> events = new ArrayList<>();
+    private long initialTempoUs = DEFAULT_TEMPO_US;
 
     public void start(Path output, String deviceName, long startNanos) throws IOException, InvalidMidiDataException {
         Path parent = output.getParent();
@@ -48,13 +54,15 @@ public class MidiRecorder {
         this.lastTick = 0;
         this.currentTempoUs = DEFAULT_TEMPO_US;
         this.outputFile = output;
+        this.events.clear();
+        this.initialTempoUs = DEFAULT_TEMPO_US;
 
         addMetaEvent(createTextMeta(0x03, "GMIDI Recorder"), 0); // Track name
         if (deviceName != null && !deviceName.isBlank()) {
             addMetaEvent(createTextMeta(0x01, "Device: " + deviceName), 0);
         }
         addMetaEvent(createTextMeta(0x01, "Date: " + DATE_FORMAT.format(Instant.now().atZone(ZoneId.systemDefault()))), 0);
-        addTempoMeta(DEFAULT_TEMPO_US, 0);
+        addTempoMeta(DEFAULT_TEMPO_US, 0, startNanos);
     }
 
     public boolean isRecording() {
@@ -66,7 +74,7 @@ public class MidiRecorder {
             return;
         }
         long micros = nanosToMicros(timestampNanos);
-        enqueue(shortMessage(ShortMessage.NOTE_ON, note, velocity), micros);
+        enqueue(shortMessage(ShortMessage.NOTE_ON, note, velocity), micros, timestampNanos);
     }
 
     public void recordNoteOff(int note, long timestampNanos) {
@@ -74,7 +82,7 @@ public class MidiRecorder {
             return;
         }
         long micros = nanosToMicros(timestampNanos);
-        enqueue(shortMessage(ShortMessage.NOTE_OFF, note, 0), micros);
+        enqueue(shortMessage(ShortMessage.NOTE_OFF, note, 0), micros, timestampNanos);
     }
 
     public void recordTempoChange(int microsecondsPerQuarter, long timestampNanos) {
@@ -82,7 +90,7 @@ public class MidiRecorder {
             return;
         }
         long micros = nanosToMicros(timestampNanos);
-        addTempoMeta(microsecondsPerQuarter, micros);
+        addTempoMeta(microsecondsPerQuarter, micros, timestampNanos);
         currentTempoUs = microsecondsPerQuarter;
     }
 
@@ -92,22 +100,23 @@ public class MidiRecorder {
         }
         long micros = nanosToMicros(timestampNanos);
         int value = sustainOn ? 127 : 0;
-        enqueue(shortMessage(ShortMessage.CONTROL_CHANGE, 64, value), micros);
+        enqueue(shortMessage(ShortMessage.CONTROL_CHANGE, 64, value), micros, timestampNanos);
     }
 
     private long nanosToMicros(long timestampNanos) {
         return Math.max(0, (timestampNanos - startNanos) / 1_000);
     }
 
-    private void enqueue(ShortMessage message, long micros) {
+    private void enqueue(ShortMessage message, long micros, long timestampNanos) {
         long deltaMicros = micros - lastEventMicros;
         long deltaTicks = microsToTicks(deltaMicros);
         lastTick += deltaTicks;
         lastEventMicros = micros;
         track.add(new MidiEvent(message, lastTick));
+        events.add(new Event(copyOf(message), timestampNanos, lastTick));
     }
 
-    private void addTempoMeta(int microsecondsPerQuarter, long micros) {
+    private void addTempoMeta(int microsecondsPerQuarter, long micros, long timestampNanos) {
         try {
             long deltaMicros = micros - lastEventMicros;
             long deltaTicks = microsToTicks(deltaMicros);
@@ -121,6 +130,10 @@ public class MidiRecorder {
             };
             meta.setMessage(0x51, data, data.length);
             addMetaEvent(meta, lastTick);
+            if (events.isEmpty()) {
+                initialTempoUs = microsecondsPerQuarter;
+            }
+            events.add(new Event(copyOf(meta), timestampNanos, lastTick));
         } catch (InvalidMidiDataException e) {
             throw new IllegalStateException("Unable to record tempo change", e);
         }
@@ -158,5 +171,41 @@ public class MidiRecorder {
         }
         recording = false;
         MidiSystem.write(sequence, 1, outputFile.toFile());
+    }
+
+    public List<Event> getEvents() {
+        return Collections.unmodifiableList(events);
+    }
+
+    public float getInitialBpm() {
+        return 60_000_000f / Math.max(1, initialTempoUs);
+    }
+
+    private MidiMessage copyOf(MidiMessage message) {
+        return (MidiMessage) message.clone();
+    }
+
+    public static final class Event {
+        private final MidiMessage message;
+        private final long nanos;
+        private final long tick;
+
+        public Event(MidiMessage message, long nanos, long tick) {
+            this.message = message;
+            this.nanos = nanos;
+            this.tick = tick;
+        }
+
+        public MidiMessage message() {
+            return message;
+        }
+
+        public long nanos() {
+            return nanos;
+        }
+
+        public long tick() {
+            return tick;
+        }
     }
 }

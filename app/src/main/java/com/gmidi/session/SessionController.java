@@ -1,6 +1,7 @@
 package com.gmidi.session;
 
 import com.gmidi.midi.MidiRecorder;
+import com.gmidi.midi.MidiReplayer;
 import com.gmidi.midi.MidiService;
 import com.gmidi.ui.KeyFallCanvas;
 import com.gmidi.ui.KeyboardView;
@@ -10,9 +11,11 @@ import javafx.animation.AnimationTimer;
 import javafx.application.Platform;
 import javafx.scene.Node;
 import javafx.scene.SnapshotParameters;
+import javafx.scene.control.Button;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressBar;
+import javafx.scene.control.Slider;
 import javafx.scene.control.ToggleButton;
 import javafx.scene.image.WritableImage;
 import javafx.scene.layout.Region;
@@ -21,6 +24,7 @@ import javafx.scene.transform.Transform;
 
 import javax.sound.midi.InvalidMidiDataException;
 import javax.sound.midi.MidiUnavailableException;
+import javax.sound.midi.Synthesizer;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -52,6 +56,10 @@ public class SessionController {
     private final Label droppedLabel;
     private final Label statusLabel;
     private final ProgressBar progressBar;
+    private final Slider fallDurationSlider;
+    private final Label fallDurationLabel;
+    private final Button replayPlayButton;
+    private final Button replayStopButton;
 
     private final VideoSettings videoSettings = new VideoSettings();
     private VideoRecorder videoRecorder;
@@ -67,6 +75,10 @@ public class SessionController {
     private Path currentVideoFile;
 
     private final AnimationTimer animationTimer;
+    private MidiReplayer midiReplayer;
+    private Synthesizer synthesizer;
+    private String soundFontPath;
+    private boolean playbackActive;
 
     public SessionController(MidiService midiService,
                              KeyboardView keyboardView,
@@ -80,7 +92,11 @@ public class SessionController {
                              Label frameLabel,
                              Label droppedLabel,
                              Label statusLabel,
-                             ProgressBar progressBar) {
+                             ProgressBar progressBar,
+                             Slider fallDurationSlider,
+                             Label fallDurationLabel,
+                             Button replayPlayButton,
+                             Button replayStopButton) {
         this.midiService = midiService;
         this.keyboardView = keyboardView;
         this.keyFallCanvas = keyFallCanvas;
@@ -94,8 +110,17 @@ public class SessionController {
         this.droppedLabel = droppedLabel;
         this.statusLabel = statusLabel;
         this.progressBar = progressBar;
+        this.fallDurationSlider = fallDurationSlider;
+        this.fallDurationLabel = fallDurationLabel;
+        this.replayPlayButton = replayPlayButton;
+        this.replayStopButton = replayStopButton;
+        this.soundFontPath = midiService.getCurrentSoundFontPath();
 
         this.keyFallCanvas.setOnImpact(keyboardView::flash);
+
+        configureFallDurationSlider();
+        configurePlaybackControls();
+        initialiseSynth();
 
         deviceCombo.setOnAction(e -> connectToSelectedDevice());
         midiRecordToggle.selectedProperty().addListener((obs, oldV, recording) -> {
@@ -119,6 +144,128 @@ public class SessionController {
                 onAnimationFrame(now);
             }
         };
+    }
+
+    private void configureFallDurationSlider() {
+        if (fallDurationSlider == null || fallDurationLabel == null) {
+            return;
+        }
+        double initial = fallDurationSlider.getValue();
+        if (initial <= 0) {
+            initial = keyFallCanvas.getFallDurationSeconds();
+            fallDurationSlider.setValue(initial);
+        }
+        double clampedInitial = Math.max(1.0, initial);
+        updateFallDurationLabel(clampedInitial);
+        fallDurationSlider.valueProperty().addListener((obs, oldV, newV) -> {
+            double seconds = Math.max(1.0, newV.doubleValue());
+            updateFallDurationLabel(seconds);
+        });
+    }
+
+    private void updateFallDurationLabel(double seconds) {
+        fallDurationLabel.setText(String.format("Fall: %.1fs", seconds));
+        keyFallCanvas.setFallDurationSeconds(seconds);
+    }
+
+    private void configurePlaybackControls() {
+        if (replayPlayButton == null || replayStopButton == null) {
+            return;
+        }
+        replayPlayButton.setOnAction(e -> playRecording());
+        replayStopButton.setOnAction(e -> stopPlayback());
+        refreshPlaybackControls();
+    }
+
+    private void initialiseSynth() {
+        try {
+            synthesizer = midiService.ensureSynth(soundFontPath);
+            soundFontPath = midiService.getCurrentSoundFontPath();
+            midiReplayer = new MidiReplayer(new MidiReplayer.VisualSink() {
+                @Override
+                public void noteOn(int midi, int velocity, long tNanos) {
+                    keyFallCanvas.onNoteOn(midi, velocity, tNanos);
+                    keyboardView.press(midi);
+                }
+
+                @Override
+                public void noteOff(int midi, long tNanos) {
+                    keyFallCanvas.onNoteOff(midi, tNanos);
+                    keyboardView.release(midi);
+                }
+            }, synthesizer);
+            midiReplayer.setOnFinished(this::onPlaybackFinished);
+            refreshPlaybackControls();
+        } catch (MidiUnavailableException | InvalidMidiDataException | IOException ex) {
+            statusLabel.setText("Synth unavailable: " + ex.getMessage());
+            replayPlayButton.setDisable(true);
+            replayStopButton.setDisable(true);
+            midiReplayer = null;
+        }
+    }
+
+    private void refreshPlaybackControls() {
+        if (replayPlayButton == null || replayStopButton == null) {
+            return;
+        }
+        boolean hasEvents = !midiRecorder.getEvents().isEmpty();
+        boolean playing = midiReplayer != null && midiReplayer.isPlaying();
+        replayPlayButton.setDisable(!hasEvents || playing);
+        replayStopButton.setDisable(!playing);
+    }
+
+    private void playRecording() {
+        if (midiReplayer == null) {
+            statusLabel.setText("Playback unavailable");
+            return;
+        }
+        List<MidiRecorder.Event> events = midiRecorder.getEvents();
+        if (events.isEmpty()) {
+            statusLabel.setText("Record something to replay");
+            refreshPlaybackControls();
+            return;
+        }
+        try {
+            midiReplayer.setSequenceFromRecorded(events, MidiRecorder.PPQ, midiRecorder.getInitialBpm());
+            keyFallCanvas.clear();
+            midiReplayer.play();
+            playbackActive = true;
+            statusLabel.setText("Replaying MIDI");
+        } catch (InvalidMidiDataException ex) {
+            statusLabel.setText("Replay failed: " + ex.getMessage());
+        }
+        refreshPlaybackControls();
+    }
+
+    private void stopPlayback() {
+        if (midiReplayer != null && midiReplayer.isPlaying()) {
+            midiReplayer.stop();
+        }
+    }
+
+    private void onPlaybackFinished() {
+        if (playbackActive) {
+            playbackActive = false;
+            statusLabel.setText("Playback stopped");
+        }
+        refreshPlaybackControls();
+    }
+
+    private void applySoundFontPath(String candidatePath) {
+        String normalized = candidatePath == null || candidatePath.isBlank() ? null : candidatePath;
+        String previous = soundFontPath;
+        try {
+            midiService.reloadSoundFont(normalized);
+            soundFontPath = midiService.getCurrentSoundFontPath();
+            if (soundFontPath == null) {
+                statusLabel.setText("Using default SoundFont");
+            } else {
+                statusLabel.setText("Loaded SoundFont: " + new java.io.File(soundFontPath).getName());
+            }
+        } catch (MidiUnavailableException | InvalidMidiDataException | IOException ex) {
+            soundFontPath = previous;
+            statusLabel.setText("SoundFont failed: " + ex.getMessage());
+        }
     }
 
     /**
@@ -176,6 +323,7 @@ public class SessionController {
             return;
         }
         try {
+            stopPlayback();
             LocalDateTime now = LocalDateTime.now();
             String baseName = FILE_FORMAT.format(now);
             Path outputDir = Optional.ofNullable(videoSettings.getOutputDirectory()).orElse(Paths.get("recordings"));
@@ -190,6 +338,7 @@ public class SessionController {
             droppedLabel.setText("Dropped: 0");
             lastVideoCaptureNanos = 0;
             currentVideoFile = null;
+            refreshPlaybackControls();
         } catch (IOException | InvalidMidiDataException ex) {
             statusLabel.setText("Unable to start MIDI recording: " + ex.getMessage());
             midiRecordToggle.setSelected(false);
@@ -203,6 +352,7 @@ public class SessionController {
         } catch (IOException ex) {
             statusLabel.setText("Unable to save MIDI: " + ex.getMessage());
         } finally {
+            refreshPlaybackControls();
             if (videoRecordToggle.isSelected()) {
                 videoRecordToggle.setSelected(false);
             }
@@ -346,8 +496,9 @@ public class SessionController {
     }
 
     public void showSettingsDialog(Node owner) {
-        SettingsDialog dialog = new SettingsDialog(videoSettings, owner);
-        dialog.showAndWait().ifPresent(updated -> {
+        SettingsDialog dialog = new SettingsDialog(videoSettings, soundFontPath, owner);
+        dialog.showAndWait().ifPresent(result -> {
+            VideoSettings updated = result.videoSettings();
             videoSettings.setOutputDirectory(updated.getOutputDirectory());
             videoSettings.setWidth(updated.getWidth());
             videoSettings.setHeight(updated.getHeight());
@@ -356,6 +507,7 @@ public class SessionController {
             videoSettings.setPreset(updated.getPreset());
             videoSettings.setFfmpegExecutable(updated.getFfmpegExecutable());
             statusLabel.setText("Updated settings");
+            applySoundFontPath(result.soundFontPath().orElse(null));
         });
     }
 
@@ -366,7 +518,12 @@ public class SessionController {
             midiRecorder.stop();
         } catch (IOException ignored) {
         }
-        midiService.close();
+        stopPlayback();
+        if (midiReplayer != null) {
+            midiReplayer.close();
+            midiReplayer = null;
+        }
+        midiService.shutdown();
     }
 
     private final class MidiEventRelay implements MidiService.MidiMessageListener {
