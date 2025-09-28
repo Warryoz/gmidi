@@ -78,6 +78,7 @@ public class KeyFallCanvas extends Canvas {
     private VelCurve velCurve = VelCurve.LINEAR;
 
     private long lastTickMicros;
+    private long visualOffsetMicros;
 
     public KeyFallCanvas() {
         super(1, 1);
@@ -274,7 +275,7 @@ public class KeyFallCanvas extends Canvas {
     }
 
     public void tickMicros(long nowMicros) {
-        long resolvedMicros = resolveTickMicros(nowMicros);
+        long resolvedMicros = resolveTickMicros(nowMicros + visualOffsetMicros);
         if (viewportHeight <= 0 || viewportWidth <= 0) {
             return;
         }
@@ -288,7 +289,7 @@ public class KeyFallCanvas extends Canvas {
     }
 
     public void renderAtMicros(long micros) {
-        long resolvedMicros = resolveTickMicros(micros);
+        long resolvedMicros = resolveTickMicros(micros + visualOffsetMicros);
         if (viewportHeight <= 0 || viewportWidth <= 0) {
             return;
         }
@@ -405,6 +406,11 @@ public class KeyFallCanvas extends Canvas {
 
     private void requestRender() {
         renderRequested = true;
+    }
+
+    public void setVisualOffsetMillis(int ms) {
+        visualOffsetMicros = ms * 1_000L;
+        requestRender();
     }
 
     private long resolveTimestampMicros(long nanos) {

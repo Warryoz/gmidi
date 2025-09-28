@@ -173,6 +173,10 @@ public class MidiService {
         return customSoundbank;
     }
 
+    public synchronized Soundbank getCustomSoundbankOrNull() {
+        return customSoundbank;
+    }
+
     public synchronized List<String> getInstrumentNames() {
         return List.copyOf(instrumentNames);
     }

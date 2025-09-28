@@ -33,7 +33,8 @@ public final class OfflineAudioRenderer {
 
     public static Sequence prepareSequence(Sequence source,
                                            MidiService.MidiProgram program,
-                                           int transposeSemis) throws InvalidMidiDataException {
+                                           MidiService.ReverbPreset reverbPreset,
+                                           int transposeSemis) throws Exception {
         if (source == null) {
             throw new IllegalArgumentException("source sequence null");
         }
@@ -60,16 +61,16 @@ public final class OfflineAudioRenderer {
         if (prepared.getTracks().length == 0) {
             prepared.createTrack();
         }
-        insertProgramChange(prepared.getTracks()[0], program);
+        MidiReplayer.insertPatchAndReverbAtTick0(prepared, program, reverbPreset);
         addEndOfTrack(prepared, maxTick);
         return prepared;
     }
 
     public static void renderWav(Sequence sequence,
                                  MidiService.MidiProgram program,
+                                 MidiService.ReverbPreset reverbPreset,
                                  int transposeSemis,
                                  VelocityMap velocityMap,
-                                 MidiService.ReverbPreset reverbPreset,
                                  Soundbank customSoundbank,
                                  File outputFile) throws Exception {
         if (sequence == null) {
@@ -85,7 +86,7 @@ public final class OfflineAudioRenderer {
         if (parent != null) {
             parent.mkdirs();
         }
-        Sequence playable = prepareSequence(sequence, program, transposeSemis);
+        Sequence playable = prepareSequence(sequence, program, reverbPreset, transposeSemis);
         AudioSynth synth = AudioSynth.create();
         AudioFormat format = new AudioFormat(44_100f, 16, 2, true, false);
         try (AudioSynth ignored = synth;
@@ -130,17 +131,6 @@ public final class OfflineAudioRenderer {
             }
         }
         return (MidiMessage) message.clone();
-    }
-
-    private static void insertProgramChange(javax.sound.midi.Track track,
-                                            MidiService.MidiProgram program) throws InvalidMidiDataException {
-        MidiService.MidiProgram patch = program != null ? program : new MidiService.MidiProgram(0, 0, 0, "GM Program 0");
-        ShortMessage msb = new ShortMessage(ShortMessage.CONTROL_CHANGE, 0, 0, clamp7bit(patch.bankMsb()));
-        ShortMessage lsb = new ShortMessage(ShortMessage.CONTROL_CHANGE, 0, 32, clamp7bit(patch.bankLsb()));
-        ShortMessage pc = new ShortMessage(ShortMessage.PROGRAM_CHANGE, 0, clamp7bit(patch.program()), 0);
-        track.add(new MidiEvent(msb, 0));
-        track.add(new MidiEvent(lsb, 0));
-        track.add(new MidiEvent(pc, 0));
     }
 
     private static void addEndOfTrack(Sequence sequence, long maxTick) throws InvalidMidiDataException {
