@@ -24,7 +24,7 @@ import java.util.function.DoubleConsumer;
  */
 public class KeyFallCanvas extends Canvas {
 
-    private static final long NANOS_PER_SECOND = 1_000_000_000L;
+    private static final long MICROS_PER_SECOND = 1_000_000L;
     private static final double SPAWN_PAD_PX = 24.0;
     private static final double IMPACT_FADE_MS = 160.0;
     private static final double IMPACT_THRESHOLD_PX = 0.0;
@@ -76,6 +76,8 @@ public class KeyFallCanvas extends Canvas {
 
     private BiConsumer<Integer, Double> onImpact;
     private VelCurve velCurve = VelCurve.LINEAR;
+
+    private long lastTickMicros;
 
     public KeyFallCanvas() {
         super(1, 1);
@@ -231,9 +233,9 @@ public class KeyFallCanvas extends Canvas {
         FallingNote finalNote = note;
         FallingNote finalNote1 = note;
         positionForMidi(midi, x -> finalNote.x = x, w -> finalNote1.w = w);
-        note.spawnNanos = tNanos > 0 ? tNanos : System.nanoTime();
+        note.spawnMicros = resolveTimestampMicros(tNanos);
         note.impacted = false;
-        note.impactNanos = 0;
+        note.impactMicros = 0;
         int clampedVelocity = Math.max(1, Math.min(127, velocity));
         double mapped = mapVelocity(clampedVelocity);
         note.trailThickness = lerp(MIN_TRAIL_THICKNESS, MAX_TRAIL_THICKNESS, mapped);
@@ -271,30 +273,43 @@ public class KeyFallCanvas extends Canvas {
         return velCurve;
     }
 
-    /**
-     * Advances the animation to {@code nowNanos}. Drawing only happens when a repaint was requested
-     * or active trails are visible so idle sessions remain inexpensive.
-     */
-    public void tick(long nowNanos) {
-        if (nowNanos <= 0) {
-            nowNanos = System.nanoTime();
-        }
+    public void tickMicros(long nowMicros) {
+        long resolvedMicros = resolveTickMicros(nowMicros);
         if (viewportHeight <= 0 || viewportWidth <= 0) {
             return;
         }
 
-        final double dtScale = NANOS_PER_SECOND;
+        boolean hasVisible = updateActiveNotes(resolvedMicros);
+        if (!renderRequested && !hasVisible) {
+            return;
+        }
+        renderRequested = false;
+        draw(resolvedMicros);
+    }
+
+    public void renderAtMicros(long micros) {
+        long resolvedMicros = resolveTickMicros(micros);
+        if (viewportHeight <= 0 || viewportWidth <= 0) {
+            return;
+        }
+        updateActiveNotes(resolvedMicros);
+        renderRequested = false;
+        draw(resolvedMicros);
+    }
+
+    private boolean updateActiveNotes(long nowMicros) {
+        final double dtScale = MICROS_PER_SECOND;
         final double keyboardLine = viewportHeight;
         boolean hasVisible = false;
 
         for (int i = active.size() - 1; i >= 0; i--) {
             FallingNote note = active.get(i);
-            double elapsed = Math.max(0, (nowNanos - note.spawnNanos) / dtScale);
+            double elapsed = Math.max(0, (nowMicros - note.spawnMicros) / dtScale);
             double y = -SPAWN_PAD_PX + fallSpeedPxPerSec * elapsed;
 
             if (!note.impacted && y >= keyboardLine - IMPACT_THRESHOLD_PX) {
                 note.impacted = true;
-                note.impactNanos = nowNanos;
+                note.impactMicros = nowMicros;
                 if (onImpact != null) {
                     onImpact.accept(note.midi, note.intensity);
                 }
@@ -302,7 +317,7 @@ public class KeyFallCanvas extends Canvas {
             }
 
             if (note.impacted) {
-                double fadeMs = (nowNanos - note.impactNanos) / 1_000_000.0;
+                double fadeMs = (nowMicros - note.impactMicros) / 1_000.0;
                 if (fadeMs >= IMPACT_FADE_MS) {
                     active.remove(i);
                     pool.addLast(note);
@@ -316,14 +331,10 @@ public class KeyFallCanvas extends Canvas {
             hasVisible = true;
         }
 
-        if (!renderRequested && !hasVisible) {
-            return;
-        }
-        renderRequested = false;
-        draw(nowNanos);
+        return hasVisible;
     }
 
-    private void draw(long nowNanos) {
+    private void draw(long nowMicros) {
         GraphicsContext g = getGraphicsContext2D();
         g.setTransform(new Affine());
         g.clearRect(0, 0, canvasW, canvasH);
@@ -338,12 +349,12 @@ public class KeyFallCanvas extends Canvas {
 
         final double keyboardLine = viewportHeight;
         for (FallingNote note : active) {
-            double elapsed = Math.max(0, (nowNanos - note.spawnNanos) / (double) NANOS_PER_SECOND);
+            double elapsed = Math.max(0, (nowMicros - note.spawnMicros) / (double) MICROS_PER_SECOND);
             double y = -SPAWN_PAD_PX + fallSpeedPxPerSec * elapsed;
             double alpha = 1.0;
 
             if (note.impacted) {
-                double fadeMs = (nowNanos - note.impactNanos) / 1_000_000.0;
+                double fadeMs = (nowMicros - note.impactMicros) / 1_000.0;
                 alpha = Math.max(0.0, 1.0 - (fadeMs / IMPACT_FADE_MS));
                 y = keyboardLine;
             } else {
@@ -393,13 +404,32 @@ public class KeyFallCanvas extends Canvas {
         renderRequested = true;
     }
 
+    private long resolveTimestampMicros(long nanos) {
+        if (nanos > 0) {
+            return nanos / 1_000L;
+        }
+        if (lastTickMicros > 0) {
+            return lastTickMicros;
+        }
+        return 0L;
+    }
+
+    private long resolveTickMicros(long candidate) {
+        long resolved = candidate > 0 ? candidate : lastTickMicros;
+        if (resolved < 0) {
+            resolved = 0;
+        }
+        lastTickMicros = resolved;
+        return resolved;
+    }
+
     private static final class FallingNote {
         int midi;
         double x;
         double w;
-        long spawnNanos;
+        long spawnMicros;
         boolean impacted;
-        long impactNanos;
+        long impactMicros;
         double trailThickness;
         double baseAlpha;
         double intensity;

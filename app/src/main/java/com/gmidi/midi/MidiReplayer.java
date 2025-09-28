@@ -155,6 +155,10 @@ public final class MidiReplayer implements AutoCloseable {
         return currentSequence != null;
     }
 
+    public Sequencer getSequencer() {
+        return sequencer;
+    }
+
     public boolean isAtEnd() {
         return currentSequence != null && sequencer.getTickPosition() >= sequencer.getTickLength();
     }
@@ -179,12 +183,9 @@ public final class MidiReplayer implements AutoCloseable {
         sequencer.setTempoFactor(factor);
     }
 
-    public void loadSequenceFromFile(File midiFile, MidiService.MidiProgram program)
-            throws IOException, InvalidMidiDataException {
+    public void loadSequenceFromFile(File midiFile) throws IOException, InvalidMidiDataException {
         Objects.requireNonNull(midiFile, "midiFile");
         Sequence sequence = MidiSystem.getSequence(midiFile);
-        this.program = program != null ? program : new MidiService.MidiProgram(0, 0, 0, "GM Program 0");
-        ensureProgramEvent(sequence, this.program);
         sequencer.setSequence(sequence);
         sequencer.setTempoFactor(1.0f);
         sequencer.setTickPosition(0);
@@ -260,7 +261,8 @@ public final class MidiReplayer implements AutoCloseable {
             int command = shortMessage.getCommand();
             int midi = shortMessage.getData1();
             int velocity = shortMessage.getData2();
-            long now = System.nanoTime();
+            long positionMicros = sequencer.getMicrosecondPosition();
+            long now = positionMicros >= 0 ? positionMicros * 1_000L : 0L;
             if (command == ShortMessage.NOTE_ON && velocity > 0) {
                 Platform.runLater(() -> visualSink.noteOn(midi, velocity, now));
             } else if (command == ShortMessage.NOTE_OFF || (command == ShortMessage.NOTE_ON && velocity == 0)) {

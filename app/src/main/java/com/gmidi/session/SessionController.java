@@ -5,9 +5,12 @@ import com.gmidi.midi.MidiReplayer;
 import com.gmidi.midi.MidiService;
 import com.gmidi.midi.MidiService.ReverbPreset;
 import com.gmidi.ui.KeyFallCanvas;
-import com.gmidi.ui.KeyboardView;
 import com.gmidi.ui.KeyFallCanvas.VelCurve;
+import com.gmidi.ui.KeyboardView;
 import com.gmidi.ui.PianoKeyLayout;
+import com.gmidi.util.Clock;
+import com.gmidi.util.SequencerClock;
+import com.gmidi.util.SystemClock;
 import com.gmidi.video.VideoRecorder;
 import com.gmidi.video.VideoSettings;
 import javafx.animation.AnimationTimer;
@@ -97,6 +100,7 @@ public class SessionController {
     private boolean recordingReplay;
 
     private final AnimationTimer animationTimer;
+    private Clock clock = new SystemClock();
     private MidiReplayer midiReplayer;
     private Synthesizer synthesizer;
     private String soundFontPath;
@@ -276,6 +280,11 @@ public class SessionController {
             }
         }, synthesizer, midiService::getTranspose);
         replayer.setOnFinished(this::onPlaybackFinished);
+        replayer.getSequencer().addMetaEventListener(meta -> {
+            if (meta.getType() == 0x2F) {
+                Platform.runLater(this::refreshPlaybackControls);
+            }
+        });
         return replayer;
     }
 
@@ -311,6 +320,7 @@ public class SessionController {
             midiReplayer.rewind();
         }
         keyFallCanvas.clear();
+        useSequencerClock();
         midiReplayer.play();
         playbackActive = true;
         if (midiReplayer.isSequenceFromFile() && midiReplayer.getSequenceFile() != null) {
@@ -368,7 +378,8 @@ public class SessionController {
         stopPlayback();
         keyFallCanvas.clear();
         try {
-            midiReplayer.loadSequenceFromFile(selected, midiService.getCurrentProgram());
+            midiReplayer.loadSequenceFromFile(selected);
+            useSequencerClock();
             loadedReplayFile = selected.toPath();
             statusLabel.setText("Loaded MIDI file → " + selected.getName());
         } catch (IOException | InvalidMidiDataException ex) {
@@ -384,6 +395,7 @@ public class SessionController {
             keyFallCanvas.clear();
             statusLabel.setText("Playback stopped");
         }
+        useSystemClock();
         refreshPlaybackControls();
     }
 
@@ -392,6 +404,7 @@ public class SessionController {
             playbackActive = false;
             statusLabel.setText("Playback finished");
         }
+        useSystemClock();
         refreshPlaybackControls();
     }
 
@@ -502,6 +515,25 @@ public class SessionController {
         animationTimer.start();
     }
 
+    private Clock ensureClock() {
+        if (clock == null) {
+            clock = new SystemClock();
+        }
+        return clock;
+    }
+
+    private void useSystemClock() {
+        clock = new SystemClock();
+    }
+
+    private void useSequencerClock() {
+        if (midiReplayer != null) {
+            clock = new SequencerClock(midiReplayer.getSequencer());
+        } else {
+            clock = new SystemClock();
+        }
+    }
+
     public void refreshMidiInputs() {
         try {
             List<MidiService.MidiInput> devices = midiService.listInputs();
@@ -535,6 +567,7 @@ public class SessionController {
             midiService.open(input);
             midiService.setListener(new MidiEventRelay());
             selectedInput = input;
+            useSystemClock();
             statusLabel.setText("Connected to " + input.name());
         } catch (MidiUnavailableException ex) {
             statusLabel.setText("Unable to open device: " + ex.getMessage());
@@ -756,7 +789,7 @@ public class SessionController {
     }
 
     private void onAnimationFrame(long now) {
-        keyFallCanvas.tick(now);
+        keyFallCanvas.tickMicros(ensureClock().nowMicros());
         updateFps(now);
         updateElapsed(now);
         if (videoRecorder != null && videoRecorder.isRunning()) {
