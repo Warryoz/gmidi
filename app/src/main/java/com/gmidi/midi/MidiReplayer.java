@@ -4,6 +4,8 @@ import javafx.application.Platform;
 
 import javax.sound.midi.InvalidMidiDataException;
 import javax.sound.midi.MetaMessage;
+import javax.sound.midi.MidiChannel;
+import javax.sound.midi.MidiDevice;
 import javax.sound.midi.MidiEvent;
 import javax.sound.midi.MidiMessage;
 import javax.sound.midi.MidiSystem;
@@ -20,13 +22,15 @@ import javax.sound.sampled.AudioInputStream;
 import javax.sound.sampled.AudioSystem;
 import java.io.File;
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.function.IntSupplier;
-
-import com.sun.media.sound.AudioSynthesizer;
 
 /**
  * Replays recorded MIDI events through a shared {@link Sequencer}. Events are mirrored to both the
@@ -200,19 +204,19 @@ public final class MidiReplayer implements AutoCloseable {
         if (parent != null) {
             Files.createDirectories(parent);
         }
-        AudioSynthesizer audioSynth = findAudioSynthesizer();
+        AudioSynthesizerFacade audioSynth = findAudioSynthesizer();
         if (audioSynth == null) {
             throw new IOException("No AudioSynthesizer implementation available");
         }
         AudioFormat format = new AudioFormat(44_100, 16, 2, true, false);
-        try (AudioInputStream stream = audioSynth.openStream(format, null)) {
+        try (AudioInputStream stream = audioSynth.openStream(format)) {
             Sequencer offlineSequencer = MidiSystem.getSequencer(false);
             offlineSequencer.open();
             try {
                 Receiver synthReceiver = audioSynth.getReceiver();
                 Receiver transposed = new TransposeReceiver(synthReceiver, () -> transpose);
                 offlineSequencer.getTransmitter().setReceiver(transposed);
-                applyPreset(audioSynth, preset);
+                applyPreset(audioSynth.getSynthesizer(), preset);
                 offlineSequencer.setSequence(sequence);
                 offlineSequencer.setTickPosition(0);
                 Thread finisher = new Thread(() -> {
@@ -222,8 +226,6 @@ public final class MidiReplayer implements AutoCloseable {
                         }
                     } catch (InterruptedException ignored) {
                         Thread.currentThread().interrupt();
-                    } finally {
-                        audioSynth.close();
                     }
                 }, "gmidi-audio-render");
                 finisher.setDaemon(true);
@@ -239,6 +241,8 @@ public final class MidiReplayer implements AutoCloseable {
                 offlineSequencer.stop();
                 offlineSequencer.close();
             }
+        } finally {
+            audioSynth.close();
         }
     }
 
@@ -339,33 +343,99 @@ public final class MidiReplayer implements AutoCloseable {
         track.add(new MidiEvent(pc, 0));
     }
 
-    private AudioSynthesizer findAudioSynthesizer() throws MidiUnavailableException {
+    private AudioSynthesizerFacade findAudioSynthesizer() throws MidiUnavailableException {
+        Class<?> audioSynthClass = resolveAudioSynthesizerClass();
+        if (audioSynthClass == null) {
+            return null;
+        }
         Synthesizer synth = MidiSystem.getSynthesizer();
-        if (synth instanceof AudioSynthesizer audioSynth) {
-            return audioSynth;
+        if (audioSynthClass.isInstance(synth)) {
+            return AudioSynthesizerFacade.wrap(synth, audioSynthClass);
         }
         for (javax.sound.midi.MidiDevice.Info info : MidiSystem.getMidiDeviceInfo()) {
-            javax.sound.midi.MidiDevice device = MidiSystem.getMidiDevice(info);
-            if (device instanceof AudioSynthesizer audioSynth) {
-                return audioSynth;
+            MidiDevice device = MidiSystem.getMidiDevice(info);
+            if (audioSynthClass.isInstance(device) && device instanceof Synthesizer found) {
+                return AudioSynthesizerFacade.wrap(found, audioSynthClass);
             }
         }
         return null;
     }
 
-    private void applyPreset(AudioSynthesizer synth, MidiService.ReverbPreset preset) {
+    private Class<?> resolveAudioSynthesizerClass() {
+        try {
+            return Class.forName("com.sun.media.sound.AudioSynthesizer");
+        } catch (ClassNotFoundException ex) {
+            return null;
+        }
+    }
+
+    private void applyPreset(Synthesizer synth, MidiService.ReverbPreset preset) {
         if (preset == null) {
             preset = MidiService.ReverbPreset.ROOM;
         }
-        javax.sound.midi.MidiChannel[] channels = synth.getChannels();
+        MidiChannel[] channels = synth.getChannels();
         if (channels == null) {
             return;
         }
-        for (javax.sound.midi.MidiChannel channel : channels) {
+        for (MidiChannel channel : channels) {
             if (channel != null) {
                 channel.controlChange(91, clamp7bit(preset.reverbCc()));
                 channel.controlChange(93, clamp7bit(preset.chorusCc()));
             }
+        }
+    }
+
+    private static final class AudioSynthesizerFacade implements AutoCloseable {
+        private final Synthesizer synth;
+        private final Method openStreamMethod;
+
+        private AudioSynthesizerFacade(Synthesizer synth, Method openStreamMethod) {
+            this.synth = synth;
+            this.openStreamMethod = openStreamMethod;
+        }
+
+        static AudioSynthesizerFacade wrap(Synthesizer synth, Class<?> audioSynthClass)
+                throws MidiUnavailableException {
+            try {
+                Method openStream = audioSynthClass.getMethod("openStream", AudioFormat.class, Map.class);
+                if (!synth.isOpen()) {
+                    synth.open();
+                }
+                return new AudioSynthesizerFacade(synth, openStream);
+            } catch (NoSuchMethodException ex) {
+                throw new IllegalStateException("AudioSynthesizer does not expose expected openStream method", ex);
+            }
+        }
+
+        AudioInputStream openStream(AudioFormat format) throws IOException, MidiUnavailableException {
+            Map<String, Object> info = new HashMap<>();
+            try {
+                return (AudioInputStream) openStreamMethod.invoke(synth, format, info);
+            } catch (IllegalAccessException ex) {
+                throw new IOException("Unable to access AudioSynthesizer#openStream", ex);
+            } catch (InvocationTargetException ex) {
+                Throwable cause = ex.getCause();
+                if (cause instanceof MidiUnavailableException mie) {
+                    throw mie;
+                }
+                if (cause instanceof IOException ioe) {
+                    throw ioe;
+                }
+                throw new IOException("AudioSynthesizer#openStream invocation failed", cause);
+            }
+        }
+
+        Receiver getReceiver() throws MidiUnavailableException {
+            return synth.getReceiver();
+        }
+
+        Synthesizer getSynthesizer() {
+            return synth;
+        }
+
+        @Override
+        public void close() {
+            synth.close();
         }
     }
 
