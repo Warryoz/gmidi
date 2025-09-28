@@ -18,7 +18,11 @@ import javax.sound.midi.Transmitter;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.function.IntSupplier;
 
@@ -41,6 +45,9 @@ public final class MidiReplayer implements AutoCloseable {
     private Sequence currentSequence;
     private boolean sequenceFromFile;
     private Path sequenceFile;
+    private List<VisualNote> visualNotes = List.of();
+    private int nextVisualIndex;
+    private long lastVisualMicros = Long.MIN_VALUE;
 
     private MidiService.ReverbPreset reverbPreset = MidiService.ReverbPreset.ROOM;
 
@@ -53,6 +60,13 @@ public final class MidiReplayer implements AutoCloseable {
         void noteOn(int midi, int velocity, long nanoTime);
 
         void noteOff(int midi, long nanoTime);
+
+        default void spawnVisual(int midi,
+                                 int velocity,
+                                 long spawnMicros,
+                                 long impactMicros,
+                                 long releaseMicros) {
+        }
     }
 
     public MidiReplayer(VisualSink visualSink,
@@ -117,6 +131,7 @@ public final class MidiReplayer implements AutoCloseable {
         currentSequence = sequence;
         sequenceFromFile = false;
         sequenceFile = null;
+        buildVisualNotes(sequence);
     }
 
     public void setProgram(MidiService.MidiProgram program) {
@@ -187,10 +202,41 @@ public final class MidiReplayer implements AutoCloseable {
 
     public void rewind() {
         sequencer.setTickPosition(0);
+        resetVisualQueue();
     }
 
     public void setTempoFactor(float factor) {
         sequencer.setTempoFactor(factor);
+    }
+
+    public void pumpVisuals(long travelMicros) {
+        if (visualNotes.isEmpty() || travelMicros <= 0 || !sequencer.isRunning()) {
+            lastVisualMicros = sequencer.getMicrosecondPosition();
+            return;
+        }
+        long currentMicros = sequencer.getMicrosecondPosition();
+        if (currentMicros < lastVisualMicros) {
+            nextVisualIndex = 0;
+        }
+        lastVisualMicros = currentMicros;
+        while (nextVisualIndex < visualNotes.size()) {
+            VisualNote note = visualNotes.get(nextVisualIndex);
+            long spawnMicros = note.onMicros - travelMicros;
+            if (spawnMicros > currentMicros) {
+                break;
+            }
+            nextVisualIndex++;
+            int midi = note.midi;
+            if (note.channel != 9) {
+                midi = clamp7bit(midi + transposeSupplier.getAsInt());
+            }
+            if (midi < 0 || midi >= 128) {
+                continue;
+            }
+            int velocity = velocityMap.map(note.velocity);
+            long release = Math.max(note.onMicros, note.offMicros);
+            visualSink.spawnVisual(midi, velocity, spawnMicros, note.onMicros, release);
+        }
     }
 
     public void loadSequenceFromFile(File midiFile) throws IOException, InvalidMidiDataException {
@@ -209,6 +255,7 @@ public final class MidiReplayer implements AutoCloseable {
         currentSequence = sequence;
         sequenceFromFile = true;
         sequenceFile = midiFile.toPath();
+        buildVisualNotes(sequence);
     }
 
     @Override
@@ -244,6 +291,7 @@ public final class MidiReplayer implements AutoCloseable {
         sequencer.stop();
         sequencer.setTickPosition(0);
         flushNotes();
+        resetVisualQueue();
         if (notifyFinished && finishedListener != null) {
             Platform.runLater(finishedListener);
         }
@@ -265,6 +313,21 @@ public final class MidiReplayer implements AutoCloseable {
         } catch (InvalidMidiDataException ex) {
             // The controller numbers are constant; if construction fails there is nothing we can do.
         }
+    }
+
+    private void buildVisualNotes(Sequence sequence) {
+        if (sequence == null) {
+            visualNotes = List.of();
+            resetVisualQueue();
+            return;
+        }
+        visualNotes = MidiTimebase.extractNotesWithMicros(sequence);
+        resetVisualQueue();
+    }
+
+    private void resetVisualQueue() {
+        nextVisualIndex = 0;
+        lastVisualMicros = Long.MIN_VALUE;
     }
 
     private static int clamp7bit(int value) {
@@ -305,6 +368,77 @@ public final class MidiReplayer implements AutoCloseable {
             target.add(new MidiEvent(new ShortMessage(ShortMessage.CONTROL_CHANGE, ch, 91, clamp7bit(preset.reverbCc())), 0));
             target.add(new MidiEvent(new ShortMessage(ShortMessage.CONTROL_CHANGE, ch, 93, clamp7bit(preset.chorusCc())), 0));
         }
+    }
+
+    public static final class MidiTimebase {
+        private MidiTimebase() {
+        }
+
+        public static List<VisualNote> extractNotesWithMicros(Sequence sequence) {
+            if (sequence == null) {
+                return List.of();
+            }
+            List<EventRef> events = new ArrayList<>();
+            for (Track track : sequence.getTracks()) {
+                for (int i = 0; i < track.size(); i++) {
+                    MidiEvent event = track.get(i);
+                    MidiMessage message = event.getMessage();
+                    if (message instanceof ShortMessage shortMessage) {
+                        int command = shortMessage.getCommand();
+                        if (command == ShortMessage.NOTE_ON || command == ShortMessage.NOTE_OFF) {
+                            events.add(new EventRef(event.getTick(), shortMessage));
+                        }
+                    }
+                }
+            }
+            events.sort(Comparator.comparingLong(EventRef::tick));
+            Map<NoteKey, NoteOn> active = new HashMap<>();
+            List<VisualNote> notes = new ArrayList<>(events.size());
+            try (Sequencer helper = MidiSystem.getSequencer(false)) {
+                helper.open();
+                helper.setSequence(sequence);
+                for (EventRef ref : events) {
+                    helper.setTickPosition(ref.tick());
+                    long micros = Math.max(0L, helper.getMicrosecondPosition());
+                    ShortMessage message = ref.message();
+                    int command = message.getCommand();
+                    int channel = message.getChannel();
+                    int midi = message.getData1();
+                    int velocity = message.getData2();
+                    NoteKey key = new NoteKey(channel, midi);
+                    if (command == ShortMessage.NOTE_ON && velocity > 0) {
+                        active.put(key, new NoteOn(channel, midi, velocity, micros));
+                    } else {
+                        NoteOn on = active.remove(key);
+                        if (on != null) {
+                            long offMicros = Math.max(micros, on.onMicros);
+                            notes.add(new VisualNote(on.channel, on.midi, on.velocity, on.onMicros, offMicros));
+                        }
+                    }
+                }
+            } catch (Exception ex) {
+                throw new IllegalStateException("Failed to resolve MIDI note timings", ex);
+            }
+            long tailMicros = Math.max(0L, sequence.getMicrosecondLength());
+            for (NoteOn dangling : active.values()) {
+                long offMicros = Math.max(tailMicros, dangling.onMicros);
+                notes.add(new VisualNote(dangling.channel, dangling.midi, dangling.velocity, dangling.onMicros, offMicros));
+            }
+            notes.sort(Comparator.comparingLong(VisualNote::onMicros));
+            return notes;
+        }
+
+        private record EventRef(long tick, ShortMessage message) {
+        }
+
+        private record NoteKey(int channel, int midi) {
+        }
+
+        private record NoteOn(int channel, int midi, int velocity, long onMicros) {
+        }
+    }
+
+    public static record VisualNote(int channel, int midi, int velocity, long onMicros, long offMicros) {
     }
 
     private static final class VelocityReceiver implements Receiver {

@@ -466,8 +466,12 @@ public class SessionController {
     private MidiReplayer createMidiReplayer() throws MidiUnavailableException {
         MidiReplayer replayer = new MidiReplayer(new MidiReplayer.VisualSink() {
             @Override
+            public void spawnVisual(int midi, int velocity, long spawnMicros, long impactMicros, long releaseMicros) {
+                keyFallCanvas.spawnScheduled(midi, velocity, spawnMicros, impactMicros, releaseMicros);
+            }
+
+            @Override
             public void noteOn(int midi, int velocity, long tNanos) {
-                keyFallCanvas.onNoteOn(midi, velocity, tNanos);
                 keyboardView.press(midi);
             }
 
@@ -1201,7 +1205,7 @@ public class SessionController {
                 try {
                     Sequence clipped = clipSequence(sequence, options.startMicros(), options.endMicros());
                     try {
-                        OfflineAudioRenderer.renderWav(
+                        audioFile = OfflineAudioRenderer.renderWav(
                                 clipped,
                                 midiService.getCurrentProgram(),
                                 midiService.getTranspose(),
@@ -1237,7 +1241,7 @@ public class SessionController {
                             midiService.getCurrentProgram(),
                             midiService.getReverbPreset(),
                             midiService.getTranspose());
-                    List<TimedNoteEvent> events = buildTimedNoteEvents(prepared, midiService.getVelocityMap());
+                    List<MidiReplayer.VisualNote> notes = buildVisualNotes(prepared, midiService.getVelocityMap());
                     double[] captureSize;
                     try {
                         captureSize = resolveCaptureSize();
@@ -1256,14 +1260,15 @@ public class SessionController {
                     }
                     long stepMicros = Math.max(1L, 1_000_000L / Math.max(1, options.fps()));
                     long totalMicros = Math.max(0L, prepared.getMicrosecondLength());
-                    long tailMicros = Math.max(0L, (long) Math.round(keyFallCanvas.getFallDurationSeconds() * 1_000_000.0));
+                    long travelMicros = Math.max(0L, keyFallCanvas.getTravelMicros());
+                    long tailMicros = travelMicros;
                     long limitMicros = totalMicros + tailMicros;
 
                     VideoRecorder recorder = new VideoRecorder();
                     boolean finished = false;
                     try {
                         recorder.begin(options.fps(), options.width(), options.height(), videoFile);
-                        FrameRenderer renderer = new FrameRenderer(events);
+                        FrameRenderer renderer = new FrameRenderer(notes, travelMicros);
                         try {
                             runOnFxAndWait(renderer::reset);
                         } catch (InterruptedException ex) {
@@ -1505,134 +1510,70 @@ public class SessionController {
         }
     }
 
-    private List<TimedNoteEvent> buildTimedNoteEvents(Sequence sequence, VelocityMap velocityMap) {
-        List<RawEvent> events = new ArrayList<>();
-        for (javax.sound.midi.Track track : sequence.getTracks()) {
-            for (int i = 0; i < track.size(); i++) {
-                MidiEvent event = track.get(i);
-                MidiMessage message = event.getMessage();
-                if (message instanceof ShortMessage shortMessage) {
-                    int command = shortMessage.getCommand();
-                    if (command == ShortMessage.NOTE_ON || command == ShortMessage.NOTE_OFF) {
-                        events.add(new RawEvent(event.getTick(), shortMessage));
-                    }
-                }
-            }
+    private List<MidiReplayer.VisualNote> buildVisualNotes(Sequence sequence, VelocityMap velocityMap) {
+        List<MidiReplayer.VisualNote> raw = MidiReplayer.MidiTimebase.extractNotesWithMicros(sequence);
+        if (raw.isEmpty()) {
+            return raw;
         }
-        events.sort(Comparator.comparingLong(RawEvent::tick));
-        List<TempoChange> tempos = buildTempoMap(sequence);
-        List<TimedNoteEvent> timeline = new ArrayList<>(events.size());
-        if (events.isEmpty()) {
-            return timeline;
+        List<MidiReplayer.VisualNote> mapped = new ArrayList<>(raw.size());
+        for (MidiReplayer.VisualNote note : raw) {
+            int midi = Math.max(0, Math.min(127, note.midi()));
+            int velocity = velocityMap != null ? velocityMap.map(note.velocity()) : note.velocity();
+            long onMicros = Math.max(0L, note.onMicros());
+            long offMicros = Math.max(onMicros, note.offMicros());
+            mapped.add(new MidiReplayer.VisualNote(
+                    note.channel(),
+                    midi,
+                    Math.max(0, Math.min(127, velocity)),
+                    onMicros,
+                    offMicros));
         }
-        long currentMicros = 0L;
-        long lastTick = 0L;
-        int tempoIndex = 0;
-        long currentMpq = tempos.get(0).mpq();
-        float divisionType = sequence.getDivisionType();
-        int resolution = sequence.getResolution();
-        for (RawEvent event : events) {
-            while (tempoIndex + 1 < tempos.size() && event.tick() >= tempos.get(tempoIndex + 1).tick()) {
-                TempoChange next = tempos.get(++tempoIndex);
-                long deltaTicks = next.tick() - lastTick;
-                currentMicros += ticksToMicros(deltaTicks, currentMpq, divisionType, resolution);
-                lastTick = next.tick();
-                currentMpq = next.mpq();
-            }
-            long deltaTicks = event.tick() - lastTick;
-            if (deltaTicks != 0) {
-                currentMicros += ticksToMicros(deltaTicks, currentMpq, divisionType, resolution);
-                lastTick = event.tick();
-            }
-            ShortMessage shortMessage = event.message();
-            int command = shortMessage.getCommand();
-            int note = shortMessage.getData1();
-            int velocity = shortMessage.getData2();
-            if (command == ShortMessage.NOTE_ON && velocity > 0) {
-                int mapped = velocityMap.map(velocity);
-                timeline.add(new TimedNoteEvent(currentMicros, note, mapped, true));
-            } else {
-                timeline.add(new TimedNoteEvent(currentMicros, note, 0, false));
-            }
-        }
-        return timeline;
-    }
-
-    private List<TempoChange> buildTempoMap(Sequence sequence) {
-        List<TempoChange> tempos = new ArrayList<>();
-        tempos.add(new TempoChange(0L, 500_000L));
-        for (javax.sound.midi.Track track : sequence.getTracks()) {
-            for (int i = 0; i < track.size(); i++) {
-                MidiEvent event = track.get(i);
-                MidiMessage message = event.getMessage();
-                if (message instanceof MetaMessage meta && meta.getType() == 0x51) {
-                    byte[] data = meta.getData();
-                    if (data.length == 3) {
-                        long mpq = ((data[0] & 0xFFL) << 16)
-                                | ((data[1] & 0xFFL) << 8)
-                                | (data[2] & 0xFFL);
-                        tempos.add(new TempoChange(event.getTick(), mpq));
-                    }
-                }
-            }
-        }
-        tempos.sort(Comparator.comparingLong(TempoChange::tick));
-        List<TempoChange> deduped = new ArrayList<>(tempos.size());
-        for (TempoChange tempo : tempos) {
-            if (!deduped.isEmpty() && deduped.get(deduped.size() - 1).tick() == tempo.tick()) {
-                deduped.set(deduped.size() - 1, tempo);
-            } else {
-                deduped.add(tempo);
-            }
-        }
-        return deduped;
-    }
-
-    private long ticksToMicros(long ticks, long mpq, float divisionType, int resolution) {
-        if (ticks <= 0) {
-            return 0L;
-        }
-        if (divisionType == Sequence.PPQ) {
-            return (ticks * mpq) / Math.max(1, resolution);
-        }
-        double microsPerTick = 1_000_000.0 / (divisionType * Math.max(1, resolution));
-        return (long) Math.round(ticks * microsPerTick);
-    }
-
-    private record TimedNoteEvent(long micros, int note, int velocity, boolean on) {
-    }
-
-    private record TempoChange(long tick, long mpq) {
-    }
-
-    private record RawEvent(long tick, ShortMessage message) {
+        mapped.sort(Comparator.comparingLong(MidiReplayer.VisualNote::onMicros));
+        return mapped;
     }
 
     private final class FrameRenderer {
-        private final List<TimedNoteEvent> events;
-        private int nextIndex;
+        private final List<MidiReplayer.VisualNote> notes;
+        private final long travelMicros;
+        private int nextSpawn;
+        private int nextPress;
+        private int nextRelease;
 
-        FrameRenderer(List<TimedNoteEvent> events) {
-            this.events = events;
+        FrameRenderer(List<MidiReplayer.VisualNote> notes, long travelMicros) {
+            this.notes = notes;
+            this.travelMicros = Math.max(1L, travelMicros);
         }
 
         void reset() {
             keyFallCanvas.clear();
             releaseAllKeys();
-            nextIndex = 0;
+            nextSpawn = 0;
+            nextPress = 0;
+            nextRelease = 0;
         }
 
         void advanceTo(long micros) {
-            while (nextIndex < events.size() && events.get(nextIndex).micros <= micros) {
-                TimedNoteEvent event = events.get(nextIndex++);
-                long nanos = event.micros * 1_000L;
-                if (event.on) {
-                    keyFallCanvas.onNoteOn(event.note, event.velocity, nanos);
-                    keyboardView.press(event.note);
-                } else {
-                    keyFallCanvas.onNoteOff(event.note, nanos);
-                    keyboardView.release(event.note);
+            while (nextSpawn < notes.size()) {
+                MidiReplayer.VisualNote note = notes.get(nextSpawn);
+                long spawnMicros = note.onMicros() - travelMicros;
+                if (spawnMicros > micros) {
+                    break;
                 }
+                nextSpawn++;
+                keyFallCanvas.spawnScheduled(
+                        note.midi(),
+                        note.velocity(),
+                        spawnMicros,
+                        note.onMicros(),
+                        Math.max(note.onMicros(), note.offMicros()));
+            }
+            while (nextPress < notes.size() && notes.get(nextPress).onMicros() <= micros) {
+                keyboardView.press(notes.get(nextPress).midi());
+                nextPress++;
+            }
+            while (nextRelease < notes.size() && notes.get(nextRelease).offMicros() <= micros) {
+                keyboardView.release(notes.get(nextRelease).midi());
+                nextRelease++;
             }
         }
     }
@@ -1712,6 +1653,9 @@ public class SessionController {
     }
 
     private void onAnimationFrame(long now) {
+        if (midiReplayer != null) {
+            midiReplayer.pumpVisuals(keyFallCanvas.getTravelMicros());
+        }
         keyFallCanvas.tickMicros(ensureClock().nowMicros());
         updateFps(now);
         updateElapsed(now);

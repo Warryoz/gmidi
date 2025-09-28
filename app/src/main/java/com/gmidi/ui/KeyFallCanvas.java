@@ -25,9 +25,7 @@ import java.util.function.DoubleConsumer;
 public class KeyFallCanvas extends Canvas {
 
     private static final long MICROS_PER_SECOND = 1_000_000L;
-    private static final double SPAWN_PAD_PX = 24.0;
     private static final double IMPACT_FADE_MS = 160.0;
-    private static final double IMPACT_THRESHOLD_PX = 0.0;
     private static final Color NOTE_COLOR = Color.web("#2CE4D0");
     // Tweak these to adjust how velocity influences the visual trails.
     private static final double MIN_TRAIL_THICKNESS = 3.0;
@@ -67,7 +65,7 @@ public class KeyFallCanvas extends Canvas {
     private double viewportHeight = MIN_H;
 
     private double fallDurationSeconds = 10.0;
-    private double fallSpeedPxPerSec = 600.0;
+    private long travelMicros = 10_000_000L;
 
     private double pendingViewportWidth = MIN_W;
     private double pendingViewportHeight = MIN_H;
@@ -110,7 +108,7 @@ public class KeyFallCanvas extends Canvas {
 
     public void setFallDurationSeconds(double seconds) {
         fallDurationSeconds = Math.max(1.0, seconds);
-        recomputeFallSpeed();
+        recomputeFallTiming();
     }
 
     public void unbindViewport() {
@@ -167,7 +165,7 @@ public class KeyFallCanvas extends Canvas {
 
         viewportWidth = vw;
         viewportHeight = vh;
-        recomputeFallSpeed();
+        recomputeFallTiming();
 
         int targetW = bucket((int) Math.round(vw), STEP_W, MIN_W, MAX_W);
         int targetH = bucket((int) Math.round(vh), STEP_H, MIN_H, MAX_H);
@@ -190,13 +188,12 @@ public class KeyFallCanvas extends Canvas {
         requestRender();
     }
 
-    private void recomputeFallSpeed() {
-        double travelDistance = viewportHeight + SPAWN_PAD_PX;
-        if (fallDurationSeconds <= 0) {
-            fallSpeedPxPerSec = 600.0;
-            return;
+    private void recomputeFallTiming() {
+        travelMicros = Math.max(1L, (long) Math.round(Math.max(1.0, fallDurationSeconds) * MICROS_PER_SECOND));
+        for (FallingNote note : active) {
+            note.spawnMicros = note.impactMicros - travelMicros;
         }
-        fallSpeedPxPerSec = travelDistance / fallDurationSeconds;
+        requestRender();
     }
 
     private static double clamp(double value, double min, double max) {
@@ -226,28 +223,22 @@ public class KeyFallCanvas extends Canvas {
         if (midi < 0 || midi >= 128) {
             return;
         }
-        FallingNote note = pool.pollFirst();
-        if (note == null) {
-            note = new FallingNote();
-        }
-        note.midi = midi;
-        FallingNote finalNote = note;
-        FallingNote finalNote1 = note;
-        positionForMidi(midi, x -> finalNote.x = x, w -> finalNote1.w = w);
-        note.spawnMicros = resolveTimestampMicros(tNanos);
-        note.impacted = false;
-        note.impactMicros = 0;
-        int clampedVelocity = Math.max(0, Math.min(127, velocity));
-        double mapped = mapVelocity(clampedVelocity);
-        note.trailThickness = lerp(MIN_TRAIL_THICKNESS, MAX_TRAIL_THICKNESS, mapped);
-        note.baseAlpha = lerp(MIN_TRAIL_ALPHA, MAX_TRAIL_ALPHA, mapped);
-        note.intensity = mapped;
-        active.add(note);
-        requestRender();
+        long impactMicros = resolveTimestampMicros(tNanos);
+        long spawnMicros = impactMicros;
+        long releaseMicros = impactMicros;
+        spawnInternal(midi, velocity, spawnMicros, impactMicros, releaseMicros, true);
     }
 
     public void onNoteOff(int midi, long tNanos) {
-        // The falling trail decouples visual state from note-off messages.
+        long releaseMicros = resolveTimestampMicros(tNanos);
+        for (int i = active.size() - 1; i >= 0; i--) {
+            FallingNote note = active.get(i);
+            if (note.midi == midi && note.awaitingRelease) {
+                note.releaseMicros = Math.max(note.impactMicros, releaseMicros);
+                note.awaitingRelease = false;
+                break;
+            }
+        }
     }
 
     public void onSustain(boolean down, long tNanos) {
@@ -260,6 +251,24 @@ public class KeyFallCanvas extends Canvas {
         }
         active.clear();
         requestRender();
+    }
+
+    public void spawnScheduled(int midi,
+                               int velocity,
+                               long spawnMicros,
+                               long impactMicros,
+                               long releaseMicros) {
+        if (midi < 0 || midi >= 128) {
+            return;
+        }
+        long clampedImpact = Math.max(0L, impactMicros);
+        long travel = getTravelMicros();
+        long clampedSpawn = Math.min(clampedImpact, spawnMicros);
+        if (clampedImpact - clampedSpawn != travel) {
+            clampedSpawn = clampedImpact - travel;
+        }
+        long clampedRelease = Math.max(clampedImpact, releaseMicros);
+        spawnInternal(midi, velocity, clampedSpawn, clampedImpact, clampedRelease, false);
     }
 
     public void setOnImpact(BiConsumer<Integer, Double> onImpact) {
@@ -299,37 +308,40 @@ public class KeyFallCanvas extends Canvas {
     }
 
     private boolean updateActiveNotes(long nowMicros) {
-        final double dtScale = MICROS_PER_SECOND;
         final double keyboardLine = viewportHeight;
         boolean hasVisible = false;
 
         for (int i = active.size() - 1; i >= 0; i--) {
             FallingNote note = active.get(i);
-            double elapsed = Math.max(0, (nowMicros - note.spawnMicros) / dtScale);
-            double y = -SPAWN_PAD_PX + fallSpeedPxPerSec * elapsed;
+            long travel = getTravelMicros();
+            double headProgress = travel > 0
+                    ? (nowMicros - note.spawnMicros) / (double) travel
+                    : 1.0;
+            double clamped = clamp(headProgress, 0.0, 1.0);
+            double headY = clamped * keyboardLine;
 
-            if (!note.impacted && y >= keyboardLine - IMPACT_THRESHOLD_PX) {
+            if (!note.impacted && nowMicros >= note.impactMicros) {
                 note.impacted = true;
-                note.impactMicros = nowMicros;
+                note.impactHitMicros = nowMicros;
                 if (onImpact != null) {
                     onImpact.accept(note.midi, note.intensity);
                 }
-                y = keyboardLine;
             }
 
             if (note.impacted) {
-                double fadeMs = (nowMicros - note.impactMicros) / 1_000.0;
+                double fadeMs = (nowMicros - note.impactHitMicros) / 1_000.0;
                 if (fadeMs >= IMPACT_FADE_MS) {
                     active.remove(i);
                     pool.addLast(note);
                     continue;
                 }
-            } else if (y > keyboardLine + SPAWN_PAD_PX) {
-                active.remove(i);
-                pool.addLast(note);
-                continue;
             }
-            hasVisible = true;
+
+            if (headY >= 0.0 && headY <= keyboardLine) {
+                hasVisible = true;
+            } else if (!note.impacted && nowMicros < note.impactMicros) {
+                hasVisible = true;
+            }
         }
 
         return hasVisible;
@@ -352,17 +364,19 @@ public class KeyFallCanvas extends Canvas {
         g.setFill(NOTE_COLOR);
 
         final double keyboardLine = viewportHeight;
+        final long travel = getTravelMicros();
         for (FallingNote note : active) {
-            double elapsed = Math.max(0, (nowMicros - note.spawnMicros) / (double) MICROS_PER_SECOND);
-            double y = -SPAWN_PAD_PX + fallSpeedPxPerSec * elapsed;
+            double headProgress = travel > 0
+                    ? (nowMicros - note.spawnMicros) / (double) travel
+                    : 1.0;
+            double clamped = clamp(headProgress, 0.0, 1.0);
+            double headY = clamped * keyboardLine;
             double alpha = 1.0;
 
             if (note.impacted) {
-                double fadeMs = (nowMicros - note.impactMicros) / 1_000.0;
+                double fadeMs = (nowMicros - note.impactHitMicros) / 1_000.0;
                 alpha = Math.max(0.0, 1.0 - (fadeMs / IMPACT_FADE_MS));
-                y = keyboardLine;
-            } else {
-                y = Math.min(y, keyboardLine);
+                headY = keyboardLine;
             }
 
             if (alpha <= 0.0) {
@@ -374,8 +388,14 @@ public class KeyFallCanvas extends Canvas {
                 continue;
             }
             g.setGlobalAlpha(appliedAlpha);
-            double thickness = note.trailThickness;
-            g.fillRoundRect(note.x, y - thickness, note.w, thickness, 6, 6);
+            double durationMicros = Math.max(0.0, note.releaseMicros - note.impactMicros);
+            double lengthPx = travel > 0 ? (durationMicros / (double) travel) * keyboardLine : 0.0;
+            double bodyHeight = Math.max(lengthPx, note.trailThickness);
+            double topY = headY - bodyHeight;
+            if (topY > keyboardLine) {
+                continue;
+            }
+            g.fillRoundRect(note.x, topY, note.w, bodyHeight, 6, 6);
         }
         g.setGlobalAlpha(1.0);
         g.restore();
@@ -437,11 +457,45 @@ public class KeyFallCanvas extends Canvas {
         double x;
         double w;
         long spawnMicros;
-        boolean impacted;
         long impactMicros;
+        long impactHitMicros;
+        long releaseMicros;
+        boolean impacted;
+        boolean awaitingRelease;
         double trailThickness;
         double baseAlpha;
         double intensity;
+    }
+
+    public long getTravelMicros() {
+        return travelMicros;
+    }
+
+    private void spawnInternal(int midi,
+                               int velocity,
+                               long spawnMicros,
+                               long impactMicros,
+                               long releaseMicros,
+                               boolean live) {
+        FallingNote note = pool.pollFirst();
+        if (note == null) {
+            note = new FallingNote();
+        }
+        note.midi = midi;
+        positionForMidi(midi, x -> note.x = x, w -> note.w = w);
+        note.spawnMicros = spawnMicros;
+        note.impactMicros = Math.max(0L, impactMicros);
+        note.releaseMicros = Math.max(note.impactMicros, releaseMicros);
+        note.impactHitMicros = 0L;
+        note.impacted = false;
+        note.awaitingRelease = live;
+        int clampedVelocity = Math.max(0, Math.min(127, velocity));
+        double mapped = mapVelocity(clampedVelocity);
+        note.trailThickness = lerp(MIN_TRAIL_THICKNESS, MAX_TRAIL_THICKNESS, mapped);
+        note.baseAlpha = lerp(MIN_TRAIL_ALPHA, MAX_TRAIL_ALPHA, mapped);
+        note.intensity = mapped;
+        active.add(note);
+        requestRender();
     }
 
     private double mapVelocity(int velocity) {
