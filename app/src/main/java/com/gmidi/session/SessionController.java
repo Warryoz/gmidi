@@ -4,8 +4,10 @@ import com.gmidi.midi.MidiRecorder;
 import com.gmidi.midi.MidiReplayer;
 import com.gmidi.midi.MidiService;
 import com.gmidi.midi.MidiService.ReverbPreset;
+import com.gmidi.midi.OfflineAudioRenderer;
+import com.gmidi.midi.VelCurve;
+import com.gmidi.midi.VelocityMap;
 import com.gmidi.ui.KeyFallCanvas;
-import com.gmidi.ui.KeyFallCanvas.VelCurve;
 import com.gmidi.ui.KeyboardView;
 import com.gmidi.ui.PianoKeyLayout;
 import com.gmidi.util.Clock;
@@ -36,9 +38,13 @@ import javafx.stage.FileChooser;
 import javafx.stage.Window;
 
 import javax.sound.midi.InvalidMidiDataException;
+import javax.sound.midi.MetaMessage;
+import javax.sound.midi.MidiEvent;
+import javax.sound.midi.MidiMessage;
 import javax.sound.midi.MidiUnavailableException;
-import javax.sound.midi.Synthesizer;
 import javax.sound.midi.Sequence;
+import javax.sound.midi.ShortMessage;
+import javax.sound.midi.Synthesizer;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -51,7 +57,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.Comparator;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicReference;
 import java.nio.file.StandardCopyOption;
 
 /**
@@ -158,6 +167,7 @@ public class SessionController {
 
         this.keyFallCanvas.setOnImpact((note, intensity) -> keyboardView.flash(note, intensity));
         this.keyFallCanvas.setVelocityCurve(velocityCurve);
+        midiService.setVelocityCurve(velocityCurve);
 
         configureViewportLayout();
         configureFallDurationSlider();
@@ -343,7 +353,7 @@ public class SessionController {
                 keyFallCanvas.onNoteOff(midi, tNanos);
                 keyboardView.release(midi);
             }
-        }, synthesizer, midiService::getTranspose);
+        }, synthesizer, midiService::getTranspose, midiService.getVelocityMap());
         replayer.setOnFinished(this::onPlaybackFinished);
         replayer.getSequencer().addMetaEventListener(meta -> {
             if (meta.getType() == 0x2F) {
@@ -686,10 +696,8 @@ public class SessionController {
     private void startVideoRecording() {
         boolean capturingLive = midiRecordToggle.isSelected();
         boolean sequenceReady = midiReplayer != null && midiReplayer.hasSequence();
-        if (!capturingLive && !sequenceReady) {
-            if (prepareRecordedSequence()) {
-                sequenceReady = true;
-            }
+        if (!capturingLive && !sequenceReady && prepareRecordedSequence()) {
+            sequenceReady = true;
         }
         boolean capturingReplayNow = !capturingLive && sequenceReady;
         if (!capturingLive && !capturingReplayNow) {
@@ -708,12 +716,6 @@ public class SessionController {
                 region.layout();
             }
         }
-        Sequence sequence = capturingReplayNow ? midiReplayer.getCurrentSequence() : null;
-        if (capturingReplayNow && sequence == null) {
-            statusLabel.setText("No MIDI sequence ready for replay capture");
-            videoRecordToggle.setSelected(false);
-            return;
-        }
         Path outputDir = Optional.ofNullable(videoSettings.getOutputDirectory()).orElse(Paths.get("recordings"));
         String baseName;
         if (capturingLive && currentMidiFile != null) {
@@ -726,24 +728,23 @@ public class SessionController {
             baseName = FILE_FORMAT.format(LocalDateTime.now());
         }
         Path finalVideo = outputDir.resolve(baseName + ".mp4");
-        Path rawVideo = capturingReplayNow ? outputDir.resolve(baseName + "-video.mp4") : finalVideo;
+
+        if (capturingReplayNow) {
+            Sequence sequence = midiReplayer.getCurrentSequence();
+            if (sequence == null) {
+                statusLabel.setText("No MIDI sequence ready for replay capture");
+                videoRecordToggle.setSelected(false);
+                return;
+            }
+            exportReplaySequence(sequence, outputDir, baseName, finalVideo);
+            return;
+        }
+
+        Path rawVideo = finalVideo;
         currentVideoFile = finalVideo;
         currentVideoTempFile = rawVideo;
         currentAudioFile = null;
         recordingReplay = false;
-
-        if (capturingReplayNow && sequence != null) {
-            Path audioOut = outputDir.resolve(baseName + ".wav");
-            try {
-                midiReplayer.renderToWav(sequence, audioOut, midiService.getReverbPreset(), midiService.getTranspose());
-                currentAudioFile = audioOut;
-                recordingReplay = true;
-            } catch (Exception ex) {
-                statusLabel.setText("Audio render failed: " + ex.getMessage() + ". Video will be silent.");
-                recordingReplay = false;
-                currentAudioFile = null;
-            }
-        }
 
         videoRecorder = new VideoRecorder();
         try {
@@ -760,22 +761,303 @@ public class SessionController {
             videoRecorder.start(rawVideo, videoSettings);
             videoFrameIntervalNanos = Math.max(1L, Math.round(1_000_000_000.0 / Math.max(1, videoSettings.getFps())));
             lastVideoCaptureNanos = 0;
-            String targetLabel = recordingReplay && currentAudioFile != null ? "video+audio" : "video";
-            statusLabel.setText("Recording " + targetLabel + " → " + finalVideo.getFileName());
+            statusLabel.setText("Recording video → " + finalVideo.getFileName());
         } catch (IOException ex) {
             statusLabel.setText(ex.getMessage());
             videoRecordToggle.setSelected(false);
             videoRecorder = null;
             currentVideoFile = null;
             currentVideoTempFile = null;
-            if (currentAudioFile != null) {
+        }
+    }
+
+    private void exportReplaySequence(Sequence sequence,
+                                      Path outputDir,
+                                      String baseName,
+                                      Path finalVideo) {
+        try {
+            Files.createDirectories(outputDir);
+        } catch (IOException ex) {
+            statusLabel.setText("Unable to create output folder: " + ex.getMessage());
+            videoRecordToggle.setSelected(false);
+            videoRecordToggle.setDisable(false);
+            return;
+        }
+
+        Path audioTemp = outputDir.resolve(baseName + "-audio.wav");
+        Path videoTemp = outputDir.resolve(baseName + "-video.mp4");
+        currentVideoFile = finalVideo;
+        currentVideoTempFile = videoTemp;
+        currentAudioFile = audioTemp;
+        videoRecordToggle.setDisable(true);
+        statusLabel.setText("Exporting video → " + finalVideo.getFileName());
+
+        double captureWidth = Math.max(1.0, captureNode.getLayoutBounds().getWidth());
+        double captureHeight = Math.max(1.0, captureNode.getLayoutBounds().getHeight());
+        int fps = Math.max(1, videoSettings.getFps());
+        double scale = Math.min(1.0,
+                Math.min(videoSettings.getWidth() / captureWidth,
+                        videoSettings.getHeight() / captureHeight));
+        if (scale <= 0.0) {
+            scale = 1.0;
+        }
+        int frameWidth = Math.max(1, (int) Math.round(captureWidth * scale));
+        int frameHeight = Math.max(1, (int) Math.round(captureHeight * scale));
+        long tailMicros = (long) Math.round(Math.max(0.0, keyFallCanvas.getFallDurationSeconds()) * 1_000_000.0);
+
+        Thread worker = new Thread(() -> {
+            try {
+                Sequence prepared = OfflineAudioRenderer.prepareSequence(
+                        sequence,
+                        midiService.getCurrentProgram(),
+                        midiService.getTranspose());
+                OfflineAudioRenderer.renderWav(
+                        sequence,
+                        midiService.getCurrentProgram(),
+                        midiService.getTranspose(),
+                        midiService.getVelocityMap(),
+                        midiService.getReverbPreset(),
+                        midiService.getCustomSoundbank(),
+                        audioTemp.toFile());
+                List<TimedNoteEvent> events = buildTimedNoteEvents(prepared, midiService.getVelocityMap());
+                renderFramesToVideo(events, videoTemp, fps, frameWidth, frameHeight, scale, tailMicros);
+                new VideoRecorder().muxWithAudio(videoTemp, audioTemp, finalVideo, videoSettings);
+                Platform.runLater(() -> {
+                    currentVideoFile = finalVideo;
+                    currentVideoTempFile = null;
+                    currentAudioFile = null;
+                    statusLabel.setText("Saved video " + finalVideo.getFileName());
+                });
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                Platform.runLater(() -> statusLabel.setText("Export interrupted"));
+            } catch (Exception ex) {
+                Platform.runLater(() -> statusLabel.setText("Export failed: " + ex.getMessage()));
+            } finally {
                 try {
-                    Files.deleteIfExists(currentAudioFile);
+                    Files.deleteIfExists(audioTemp);
                 } catch (IOException ignored) {
                 }
+                try {
+                    Files.deleteIfExists(videoTemp);
+                } catch (IOException ignored) {
+                }
+                Platform.runLater(() -> {
+                    videoRecordToggle.setDisable(false);
+                    videoRecordToggle.setSelected(false);
+                    currentAudioFile = null;
+                    currentVideoTempFile = null;
+                });
             }
-            currentAudioFile = null;
-            recordingReplay = false;
+        }, "gmidi-export");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    private void renderFramesToVideo(List<TimedNoteEvent> events,
+                                     Path videoFile,
+                                     int fps,
+                                     int frameWidth,
+                                     int frameHeight,
+                                     double scale,
+                                     long tailMicros) throws IOException, InterruptedException {
+        VideoRecorder recorder = new VideoRecorder();
+        recorder.beginFramePush(videoFile, videoSettings);
+        try {
+            FrameRenderer renderer = new FrameRenderer(events);
+            runOnFxAndWait(renderer::reset);
+            long stepMicros = Math.max(1L, Math.round(1_000_000.0 / Math.max(1, fps)));
+            long lastMicros = events.isEmpty() ? 0L : events.get(events.size() - 1).micros();
+            long totalMicros = lastMicros + Math.max(0L, tailMicros);
+            for (long micros = 0; micros <= totalMicros; micros += stepMicros) {
+                WritableImage frame = captureFrameAtMicros(renderer, micros, frameWidth, frameHeight, scale);
+                recorder.pushFrame(frame);
+            }
+            if (totalMicros % stepMicros != 0) {
+                WritableImage frame = captureFrameAtMicros(renderer, totalMicros, frameWidth, frameHeight, scale);
+                recorder.pushFrame(frame);
+            }
+        } finally {
+            recorder.end();
+            runOnFxAndWait(() -> {
+                keyFallCanvas.clear();
+                releaseAllKeys();
+            });
+        }
+    }
+
+    private WritableImage captureFrameAtMicros(FrameRenderer renderer,
+                                               long micros,
+                                               int frameWidth,
+                                               int frameHeight,
+                                               double scale) throws InterruptedException {
+        AtomicReference<WritableImage> frameRef = new AtomicReference<>();
+        runOnFxAndWait(() -> {
+            renderer.advanceTo(micros);
+            keyFallCanvas.renderAtMicros(micros);
+            SnapshotParameters params = new SnapshotParameters();
+            params.setFill(Color.rgb(18, 18, 18));
+            if (scale != 1.0) {
+                params.setTransform(Transform.scale(scale, scale));
+            }
+            WritableImage target = new WritableImage(frameWidth, frameHeight);
+            WritableImage snapshot = captureNode.snapshot(params, target);
+            frameRef.set(snapshot);
+        });
+        return frameRef.get();
+    }
+
+    private void runOnFxAndWait(Runnable action) throws InterruptedException {
+        if (Platform.isFxApplicationThread()) {
+            action.run();
+            return;
+        }
+        CountDownLatch latch = new CountDownLatch(1);
+        Platform.runLater(() -> {
+            try {
+                action.run();
+            } finally {
+                latch.countDown();
+            }
+        });
+        latch.await();
+    }
+
+    private void releaseAllKeys() {
+        for (int note = 0; note < 128; note++) {
+            keyboardView.release(note);
+        }
+    }
+
+    private List<TimedNoteEvent> buildTimedNoteEvents(Sequence sequence, VelocityMap velocityMap) {
+        List<RawEvent> events = new ArrayList<>();
+        for (javax.sound.midi.Track track : sequence.getTracks()) {
+            for (int i = 0; i < track.size(); i++) {
+                MidiEvent event = track.get(i);
+                MidiMessage message = event.getMessage();
+                if (message instanceof ShortMessage shortMessage) {
+                    int command = shortMessage.getCommand();
+                    if (command == ShortMessage.NOTE_ON || command == ShortMessage.NOTE_OFF) {
+                        events.add(new RawEvent(event.getTick(), shortMessage));
+                    }
+                }
+            }
+        }
+        events.sort(Comparator.comparingLong(RawEvent::tick));
+        List<TempoChange> tempos = buildTempoMap(sequence);
+        List<TimedNoteEvent> timeline = new ArrayList<>(events.size());
+        if (events.isEmpty()) {
+            return timeline;
+        }
+        long currentMicros = 0L;
+        long lastTick = 0L;
+        int tempoIndex = 0;
+        long currentMpq = tempos.get(0).mpq();
+        float divisionType = sequence.getDivisionType();
+        int resolution = sequence.getResolution();
+        for (RawEvent event : events) {
+            while (tempoIndex + 1 < tempos.size() && event.tick() >= tempos.get(tempoIndex + 1).tick()) {
+                TempoChange next = tempos.get(++tempoIndex);
+                long deltaTicks = next.tick() - lastTick;
+                currentMicros += ticksToMicros(deltaTicks, currentMpq, divisionType, resolution);
+                lastTick = next.tick();
+                currentMpq = next.mpq();
+            }
+            long deltaTicks = event.tick() - lastTick;
+            if (deltaTicks != 0) {
+                currentMicros += ticksToMicros(deltaTicks, currentMpq, divisionType, resolution);
+                lastTick = event.tick();
+            }
+            ShortMessage shortMessage = event.message();
+            int command = shortMessage.getCommand();
+            int note = shortMessage.getData1();
+            int velocity = shortMessage.getData2();
+            if (command == ShortMessage.NOTE_ON && velocity > 0) {
+                int mapped = velocityMap.map(velocity);
+                timeline.add(new TimedNoteEvent(currentMicros, note, mapped, true));
+            } else {
+                timeline.add(new TimedNoteEvent(currentMicros, note, 0, false));
+            }
+        }
+        return timeline;
+    }
+
+    private List<TempoChange> buildTempoMap(Sequence sequence) {
+        List<TempoChange> tempos = new ArrayList<>();
+        tempos.add(new TempoChange(0L, 500_000L));
+        for (javax.sound.midi.Track track : sequence.getTracks()) {
+            for (int i = 0; i < track.size(); i++) {
+                MidiEvent event = track.get(i);
+                MidiMessage message = event.getMessage();
+                if (message instanceof MetaMessage meta && meta.getType() == 0x51) {
+                    byte[] data = meta.getData();
+                    if (data.length == 3) {
+                        long mpq = ((data[0] & 0xFFL) << 16)
+                                | ((data[1] & 0xFFL) << 8)
+                                | (data[2] & 0xFFL);
+                        tempos.add(new TempoChange(event.getTick(), mpq));
+                    }
+                }
+            }
+        }
+        tempos.sort(Comparator.comparingLong(TempoChange::tick));
+        List<TempoChange> deduped = new ArrayList<>(tempos.size());
+        for (TempoChange tempo : tempos) {
+            if (!deduped.isEmpty() && deduped.get(deduped.size() - 1).tick() == tempo.tick()) {
+                deduped.set(deduped.size() - 1, tempo);
+            } else {
+                deduped.add(tempo);
+            }
+        }
+        return deduped;
+    }
+
+    private long ticksToMicros(long ticks, long mpq, float divisionType, int resolution) {
+        if (ticks <= 0) {
+            return 0L;
+        }
+        if (divisionType == Sequence.PPQ) {
+            return (ticks * mpq) / Math.max(1, resolution);
+        }
+        double microsPerTick = 1_000_000.0 / (divisionType * Math.max(1, resolution));
+        return (long) Math.round(ticks * microsPerTick);
+    }
+
+    private record TimedNoteEvent(long micros, int note, int velocity, boolean on) {
+    }
+
+    private record TempoChange(long tick, long mpq) {
+    }
+
+    private record RawEvent(long tick, ShortMessage message) {
+    }
+
+    private final class FrameRenderer {
+        private final List<TimedNoteEvent> events;
+        private int nextIndex;
+
+        FrameRenderer(List<TimedNoteEvent> events) {
+            this.events = events;
+        }
+
+        void reset() {
+            keyFallCanvas.clear();
+            releaseAllKeys();
+            nextIndex = 0;
+        }
+
+        void advanceTo(long micros) {
+            while (nextIndex < events.size() && events.get(nextIndex).micros <= micros) {
+                TimedNoteEvent event = events.get(nextIndex++);
+                long nanos = event.micros * 1_000L;
+                if (event.on) {
+                    keyFallCanvas.onNoteOn(event.note, event.velocity, nanos);
+                    keyboardView.press(event.note);
+                } else {
+                    keyFallCanvas.onNoteOff(event.note, nanos);
+                    keyboardView.release(event.note);
+                }
+            }
         }
     }
 
@@ -977,6 +1259,7 @@ public class SessionController {
             if (newCurve != null && newCurve != velocityCurve) {
                 velocityCurve = newCurve;
                 keyFallCanvas.setVelocityCurve(newCurve);
+                midiService.setVelocityCurve(newCurve);
                 velocityChanged = true;
             }
 

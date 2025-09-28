@@ -4,8 +4,6 @@ import javafx.application.Platform;
 
 import javax.sound.midi.InvalidMidiDataException;
 import javax.sound.midi.MetaMessage;
-import javax.sound.midi.MidiChannel;
-import javax.sound.midi.MidiDevice;
 import javax.sound.midi.MidiEvent;
 import javax.sound.midi.MidiMessage;
 import javax.sound.midi.MidiSystem;
@@ -16,19 +14,10 @@ import javax.sound.midi.Sequencer;
 import javax.sound.midi.ShortMessage;
 import javax.sound.midi.Synthesizer;
 import javax.sound.midi.Transmitter;
-import javax.sound.sampled.AudioFileFormat;
-import javax.sound.sampled.AudioFormat;
-import javax.sound.sampled.AudioInputStream;
-import javax.sound.sampled.AudioSystem;
 import java.io.File;
 import java.io.IOException;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.function.IntSupplier;
 
@@ -45,6 +34,7 @@ public final class MidiReplayer implements AutoCloseable {
     private final Transmitter transmitter;
     private final IntSupplier transposeSupplier;
     private final VisualSink visualSink;
+    private final VelocityMap velocityMap;
 
     private MidiService.MidiProgram program = new MidiService.MidiProgram(0, 0, 0, "GM Program 0");
     private Sequence currentSequence;
@@ -64,7 +54,8 @@ public final class MidiReplayer implements AutoCloseable {
 
     public MidiReplayer(VisualSink visualSink,
                         Synthesizer synthesizer,
-                        IntSupplier transposeSupplier) throws MidiUnavailableException {
+                        IntSupplier transposeSupplier,
+                        VelocityMap velocityMap) throws MidiUnavailableException {
         this.visualSink = Objects.requireNonNull(visualSink, "visualSink");
         this.synthesizer = Objects.requireNonNull(synthesizer, "synthesizer");
         if (!synthesizer.isOpen()) {
@@ -72,6 +63,7 @@ public final class MidiReplayer implements AutoCloseable {
         }
         this.synthReceiver = synthesizer.getReceiver();
         this.transposeSupplier = Objects.requireNonNull(transposeSupplier, "transposeSupplier");
+        this.velocityMap = Objects.requireNonNull(velocityMap, "velocityMap");
         this.sequencer = MidiSystem.getSequencer(false);
         sequencer.open();
         this.visualReceiver = new Receiver() {
@@ -86,8 +78,8 @@ public final class MidiReplayer implements AutoCloseable {
             }
         };
         this.transmitter = sequencer.getTransmitter();
-        Receiver synthTarget = new TransposeReceiver(synthReceiver, transposeSupplier);
-        Receiver visualTarget = new TransposeReceiver(visualReceiver, transposeSupplier);
+        Receiver synthTarget = new VelocityReceiver(new TransposeReceiver(synthReceiver, transposeSupplier), this.velocityMap);
+        Receiver visualTarget = new VelocityReceiver(new TransposeReceiver(visualReceiver, transposeSupplier), this.velocityMap);
         this.transmitter.setReceiver(new TeeReceiver(synthTarget, visualTarget));
         sequencer.addMetaEventListener(meta -> {
             if (meta.getType() == 0x2F) {
@@ -167,6 +159,11 @@ public final class MidiReplayer implements AutoCloseable {
         return currentSequence;
     }
 
+    public long getSequenceLengthMicros() {
+        Sequence sequence = sequencer.getSequence();
+        return sequence != null ? sequence.getMicrosecondLength() : 0L;
+    }
+
     public boolean isSequenceFromFile() {
         return sequenceFromFile;
     }
@@ -192,61 +189,6 @@ public final class MidiReplayer implements AutoCloseable {
         currentSequence = sequence;
         sequenceFromFile = true;
         sequenceFile = midiFile.toPath();
-    }
-
-    public void renderToWav(Sequence sequence,
-                            Path output,
-                            MidiService.ReverbPreset preset,
-                            int transpose)
-            throws IOException, MidiUnavailableException {
-        Objects.requireNonNull(sequence, "sequence");
-        Objects.requireNonNull(output, "output");
-        Path parent = output.toAbsolutePath().getParent();
-        if (parent != null) {
-            Files.createDirectories(parent);
-        }
-        AudioSynthesizerFacade audioSynth = findAudioSynthesizer();
-        if (audioSynth == null) {
-            throw new IOException("No AudioSynthesizer implementation available");
-        }
-        AudioFormat format = new AudioFormat(44_100, 16, 2, true, false);
-        try (AudioInputStream stream = audioSynth.openStream(format)) {
-            Sequencer offlineSequencer = MidiSystem.getSequencer(false);
-            offlineSequencer.open();
-            try {
-                Receiver synthReceiver = audioSynth.getReceiver();
-                Receiver transposed = new TransposeReceiver(synthReceiver, () -> transpose);
-                offlineSequencer.getTransmitter().setReceiver(transposed);
-                applyPreset(audioSynth.getSynthesizer(), preset);
-                offlineSequencer.setSequence(sequence);
-                offlineSequencer.setTickPosition(0);
-                Thread finisher = new Thread(() -> {
-                    try {
-                        while (offlineSequencer.isRunning()) {
-                            Thread.sleep(10);
-                        }
-                    } catch (InterruptedException ignored) {
-                        Thread.currentThread().interrupt();
-                    }
-                }, "gmidi-audio-render");
-                finisher.setDaemon(true);
-                offlineSequencer.start();
-                finisher.start();
-                AudioSystem.write(stream, AudioFileFormat.Type.WAVE, output.toFile());
-                try {
-                    finisher.join();
-                } catch (InterruptedException ex) {
-                    Thread.currentThread().interrupt();
-                }
-            } catch (InvalidMidiDataException e) {
-                throw new RuntimeException(e);
-            } finally {
-                offlineSequencer.stop();
-                offlineSequencer.close();
-            }
-        } finally {
-            audioSynth.close();
-        }
     }
 
     @Override
@@ -347,99 +289,45 @@ public final class MidiReplayer implements AutoCloseable {
         track.add(new MidiEvent(pc, 0));
     }
 
-    private AudioSynthesizerFacade findAudioSynthesizer() throws MidiUnavailableException {
-        Class<?> audioSynthClass = resolveAudioSynthesizerClass();
-        if (audioSynthClass == null) {
-            return null;
-        }
-        Synthesizer synth = MidiSystem.getSynthesizer();
-        if (audioSynthClass.isInstance(synth)) {
-            return AudioSynthesizerFacade.wrap(synth, audioSynthClass);
-        }
-        for (javax.sound.midi.MidiDevice.Info info : MidiSystem.getMidiDeviceInfo()) {
-            MidiDevice device = MidiSystem.getMidiDevice(info);
-            if (audioSynthClass.isInstance(device) && device instanceof Synthesizer found) {
-                return AudioSynthesizerFacade.wrap(found, audioSynthClass);
-            }
-        }
-        return null;
-    }
+    private static final class VelocityReceiver implements Receiver {
+        private final Receiver out;
+        private final VelocityMap velocityMap;
 
-    private Class<?> resolveAudioSynthesizerClass() {
-        try {
-            return Class.forName("com.sun.media.sound.AudioSynthesizer");
-        } catch (ClassNotFoundException ex) {
-            return null;
-        }
-    }
-
-    private void applyPreset(Synthesizer synth, MidiService.ReverbPreset preset) {
-        if (preset == null) {
-            preset = MidiService.ReverbPreset.ROOM;
-        }
-        MidiChannel[] channels = synth.getChannels();
-        if (channels == null) {
-            return;
-        }
-        for (MidiChannel channel : channels) {
-            if (channel != null) {
-                channel.controlChange(91, clamp7bit(preset.reverbCc()));
-                channel.controlChange(93, clamp7bit(preset.chorusCc()));
-            }
-        }
-    }
-
-    private static final class AudioSynthesizerFacade implements AutoCloseable {
-        private final Synthesizer synth;
-        private final Method openStreamMethod;
-
-        private AudioSynthesizerFacade(Synthesizer synth, Method openStreamMethod) {
-            this.synth = synth;
-            this.openStreamMethod = openStreamMethod;
+        private VelocityReceiver(Receiver out, VelocityMap velocityMap) {
+            this.out = out;
+            this.velocityMap = velocityMap;
         }
 
-        static AudioSynthesizerFacade wrap(Synthesizer synth, Class<?> audioSynthClass)
-                throws MidiUnavailableException {
-            try {
-                Method openStream = audioSynthClass.getMethod("openStream", AudioFormat.class, Map.class);
-                if (!synth.isOpen()) {
-                    synth.open();
+        @Override
+        public void send(MidiMessage message, long timeStamp) {
+            if (message instanceof ShortMessage shortMessage) {
+                int command = shortMessage.getCommand();
+                if (command == ShortMessage.NOTE_ON) {
+                    int velocity = shortMessage.getData2();
+                    if (velocity > 0) {
+                        int mapped = velocityMap.map(velocity);
+                        if (mapped != velocity) {
+                            try {
+                                ShortMessage remapped = new ShortMessage();
+                                remapped.setMessage(ShortMessage.NOTE_ON,
+                                        shortMessage.getChannel(),
+                                        shortMessage.getData1(),
+                                        mapped);
+                                out.send(remapped, timeStamp);
+                                return;
+                            } catch (InvalidMidiDataException ignored) {
+                                // Fall through to send original event.
+                            }
+                        }
+                    }
                 }
-                return new AudioSynthesizerFacade(synth, openStream);
-            } catch (NoSuchMethodException ex) {
-                throw new IllegalStateException("AudioSynthesizer does not expose expected openStream method", ex);
             }
-        }
-
-        AudioInputStream openStream(AudioFormat format) throws IOException, MidiUnavailableException {
-            Map<String, Object> info = new HashMap<>();
-            try {
-                return (AudioInputStream) openStreamMethod.invoke(synth, format, info);
-            } catch (IllegalAccessException ex) {
-                throw new IOException("Unable to access AudioSynthesizer#openStream", ex);
-            } catch (InvocationTargetException ex) {
-                Throwable cause = ex.getCause();
-                if (cause instanceof MidiUnavailableException mie) {
-                    throw mie;
-                }
-                if (cause instanceof IOException ioe) {
-                    throw ioe;
-                }
-                throw new IOException("AudioSynthesizer#openStream invocation failed", cause);
-            }
-        }
-
-        Receiver getReceiver() throws MidiUnavailableException {
-            return synth.getReceiver();
-        }
-
-        Synthesizer getSynthesizer() {
-            return synth;
+            out.send(message, timeStamp);
         }
 
         @Override
         public void close() {
-            synth.close();
+            out.close();
         }
     }
 
