@@ -43,6 +43,7 @@ public class MidiService {
     private MidiProgram currentProgram = MidiProgram.gmPiano();
     private volatile int transposeSemis;
     private volatile ReverbPreset reverbPreset = ReverbPreset.ROOM;
+    private final VelocityMap velocityMap = new VelocityMap();
 
     public List<MidiInput> listInputs() throws MidiUnavailableException {
         List<MidiInput> result = new ArrayList<>();
@@ -168,6 +169,10 @@ public class MidiService {
         return currentSoundFontPath;
     }
 
+    public synchronized Soundbank getCustomSoundbank() {
+        return customSoundbank;
+    }
+
     public synchronized List<String> getInstrumentNames() {
         return List.copyOf(instrumentNames);
     }
@@ -205,6 +210,14 @@ public class MidiService {
         int clamped = Math.max(-24, Math.min(24, semitones));
         transposeSemis = clamped;
         sendAllNotesOff();
+    }
+
+    public void setVelocityCurve(VelCurve curve) {
+        velocityMap.setCurve(curve);
+    }
+
+    public VelocityMap getVelocityMap() {
+        return velocityMap;
     }
 
     public ReverbPreset getReverbPreset() {
@@ -438,27 +451,45 @@ public class MidiService {
 
         private void handleShortMessage(ShortMessage shortMessage, long now) {
             ShortMessage routed = transposeIfNeeded(shortMessage);
-            sendToSynth(routed);
-            switch (routed.getCommand()) {
-                case ShortMessage.NOTE_ON -> {
-                    int velocity = routed.getData2();
-                    int note = routed.getData1();
-                    if (velocity == 0) {
-                        publishNoteOff(note, now);
-                    } else {
-                        publishNoteOn(note, velocity, now);
-                    }
+            int command = routed.getCommand();
+            switch (command) {
+                case ShortMessage.NOTE_ON -> handleNoteOn(routed, now);
+                case ShortMessage.NOTE_OFF -> {
+                    sendToSynth(routed);
+                    publishNoteOff(routed.getData1(), now);
                 }
-                case ShortMessage.NOTE_OFF -> publishNoteOff(routed.getData1(), now);
                 case ShortMessage.CONTROL_CHANGE -> {
+                    sendToSynth(routed);
                     int controller = routed.getData1();
                     if (controller == 64) {
                         publishSustain(routed.getData2() >= 64, now);
                     }
                 }
-                default -> {
-                }
+                default -> sendToSynth(routed);
             }
+        }
+
+        private void handleNoteOn(ShortMessage message, long now) {
+            int velocity = message.getData2();
+            int note = message.getData1();
+            if (velocity == 0) {
+                sendToSynth(message);
+                publishNoteOff(note, now);
+                return;
+            }
+            int mapped = velocityMap.map(velocity);
+            try {
+                ShortMessage mappedMessage = new ShortMessage();
+                mappedMessage.setMessage(
+                        ShortMessage.NOTE_ON,
+                        message.getChannel(),
+                        note,
+                        mapped);
+                sendToSynth(mappedMessage);
+            } catch (InvalidMidiDataException ex) {
+                sendToSynth(message);
+            }
+            publishNoteOn(note, mapped, now);
         }
 
         private void handleMetaMessage(MetaMessage message, long now) {

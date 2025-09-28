@@ -46,8 +46,17 @@ public class VideoRecorder {
     private final StringBuilder stderrBuffer = new StringBuilder();
     private String ffmpegExecutablePath;
     private List<String> ffmpegCommand = Collections.emptyList();
+    private boolean manualPush;
 
     public void start(Path outputFile, VideoSettings settings) throws IOException {
+        startInternal(outputFile, settings, false);
+    }
+
+    public void beginFramePush(Path outputFile, VideoSettings settings) throws IOException {
+        startInternal(outputFile, settings, true);
+    }
+
+    private void startInternal(Path outputFile, VideoSettings settings, boolean manual) throws IOException {
         Objects.requireNonNull(outputFile, "outputFile");
         Objects.requireNonNull(settings, "settings");
         if (running.get()) {
@@ -97,35 +106,41 @@ public class VideoRecorder {
         logCommand();
 
         ffmpegInput = ffmpegProcess.getOutputStream();
-        ThreadFactory factory = runnable -> {
-            Thread t = new Thread(runnable, "gmidi-ffmpeg-writer");
-            t.setDaemon(true);
-            return t;
-        };
-        int queueCapacity = Math.max(4, settings.getFps() / 2);
-        BlockingQueue<Runnable> queue = new LinkedBlockingQueue<>(queueCapacity);
-        encoderExecutor = new ThreadPoolExecutor(
-                1,
-                1,
-                0L,
-                TimeUnit.MILLISECONDS,
-                queue,
-                factory,
-                (runnable, executor) -> {
-                    if (executor.isShutdown()) {
-                        throw new RejectedExecutionException("Encoder shutdown");
-                    }
-                    Runnable dropped = executor.getQueue().poll();
-                    if (dropped != null) {
-                        framesDropped.incrementAndGet();
-                    }
-                    executor.execute(runnable);
-                }
-        );
         running.set(true);
+        manualPush = manual;
         framesWritten.set(0);
         framesDropped.set(0);
         stderrBuffer.setLength(0);
+
+        if (!manual) {
+            ThreadFactory factory = runnable -> {
+                Thread t = new Thread(runnable, "gmidi-ffmpeg-writer");
+                t.setDaemon(true);
+                return t;
+            };
+            int queueCapacity = Math.max(4, settings.getFps() / 2);
+            BlockingQueue<Runnable> queue = new LinkedBlockingQueue<>(queueCapacity);
+            encoderExecutor = new ThreadPoolExecutor(
+                    1,
+                    1,
+                    0L,
+                    TimeUnit.MILLISECONDS,
+                    queue,
+                    factory,
+                    (runnable, executor) -> {
+                        if (executor.isShutdown()) {
+                            throw new RejectedExecutionException("Encoder shutdown");
+                        }
+                        Runnable dropped = executor.getQueue().poll();
+                        if (dropped != null) {
+                            framesDropped.incrementAndGet();
+                        }
+                        executor.execute(runnable);
+                    }
+            );
+        } else {
+            encoderExecutor = null;
+        }
         startStderrDrainer();
     }
 
@@ -141,12 +156,36 @@ public class VideoRecorder {
         return framesDropped.get();
     }
 
+    public void end() throws IOException, InterruptedException {
+        stop(Duration.ofSeconds(5));
+    }
+
     public boolean writeFrame(WritableImage image) {
         if (!running.get()) {
             return false;
         }
+        if (manualPush) {
+            try {
+                pushFrame(image);
+                return true;
+            } catch (IOException ex) {
+                framesDropped.incrementAndGet();
+                return false;
+            }
+        }
+        ExecutorService executor = encoderExecutor;
+        if (executor == null) {
+            return false;
+        }
         try {
-            encoderExecutor.submit(() -> encode(image));
+            executor.submit(() -> {
+                try {
+                    encode(image);
+                    framesWritten.incrementAndGet();
+                } catch (IOException ex) {
+                    framesDropped.incrementAndGet();
+                }
+            });
             return true;
         } catch (RejectedExecutionException ex) {
             framesDropped.incrementAndGet();
@@ -154,7 +193,15 @@ public class VideoRecorder {
         }
     }
 
-    private void encode(WritableImage image) {
+    public void pushFrame(WritableImage image) throws IOException {
+        if (!manualPush || !running.get()) {
+            throw new IllegalStateException("Video recorder not in frame push mode");
+        }
+        encode(image);
+        framesWritten.incrementAndGet();
+    }
+
+    private void encode(WritableImage image) throws IOException {
         try {
             BufferedImage buffered = new BufferedImage((int) image.getWidth(), (int) image.getHeight(), BufferedImage.TYPE_INT_ARGB);
             PixelReader reader = image.getPixelReader();
@@ -172,9 +219,10 @@ public class VideoRecorder {
                 ffmpegInput.write(bytes);
                 ffmpegInput.flush();
             }
-            framesWritten.incrementAndGet();
+        } catch (IOException ex) {
+            throw ex;
         } catch (Exception ex) {
-            framesDropped.incrementAndGet();
+            throw new IOException("Failed to encode frame", ex);
         }
     }
 
@@ -228,6 +276,7 @@ public class VideoRecorder {
         ffmpegInput = null;
         ffmpegExecutablePath = null;
         ffmpegCommand = Collections.emptyList();
+        manualPush = false;
     }
 
     private void logCommand() {
