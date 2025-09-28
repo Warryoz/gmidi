@@ -25,6 +25,7 @@ public class KeyboardView extends Region {
     private final Canvas canvas = new Canvas(800, 120);
     private final boolean[] pressed = new boolean[128];
     private final long[] flashStartNanos = new long[128];
+    private final double[] flashIntensity = new double[128];
     private boolean flashTimerActive;
     private final AnimationTimer flashTimer = new AnimationTimer() {
         @Override
@@ -68,11 +69,16 @@ public class KeyboardView extends Region {
         redraw();
     }
 
-    public void flash(int midiNote) {
+    public void flash(int midiNote, double intensity) {
         if (midiNote < 0 || midiNote >= flashStartNanos.length) {
             return;
         }
+        double clamped = Math.max(0.0, Math.min(1.0, intensity));
+        if (clamped <= 0.0) {
+            return;
+        }
         flashStartNanos[midiNote] = System.nanoTime();
+        flashIntensity[midiNote] = clamped;
         ensureFlashTimer();
         redraw();
     }
@@ -215,9 +221,14 @@ public class KeyboardView extends Region {
         double elapsedMs = (nowNanos - start) / 1_000_000.0;
         if (elapsedMs >= FLASH_DURATION_MS) {
             flashStartNanos[midiNote] = 0;
+            flashIntensity[midiNote] = 0;
             return 0;
         }
         flashActiveDuringDraw = true;
-        return 1.0 - (elapsedMs / FLASH_DURATION_MS);
+        double base = flashIntensity[midiNote];
+        if (base <= 0) {
+            return 0;
+        }
+        return base * (1.0 - (elapsedMs / FLASH_DURATION_MS));
     }
 }

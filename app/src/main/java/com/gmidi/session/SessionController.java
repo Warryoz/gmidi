@@ -5,6 +5,7 @@ import com.gmidi.midi.MidiReplayer;
 import com.gmidi.midi.MidiService;
 import com.gmidi.ui.KeyFallCanvas;
 import com.gmidi.ui.KeyboardView;
+import com.gmidi.ui.KeyFallCanvas.VelCurve;
 import com.gmidi.video.VideoRecorder;
 import com.gmidi.video.VideoSettings;
 import javafx.animation.AnimationTimer;
@@ -25,13 +26,17 @@ import javafx.scene.transform.Transform;
 import javax.sound.midi.InvalidMidiDataException;
 import javax.sound.midi.MidiUnavailableException;
 import javax.sound.midi.Synthesizer;
+import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Objects;
 import java.util.Optional;
 
 /**
@@ -78,6 +83,9 @@ public class SessionController {
     private MidiReplayer midiReplayer;
     private Synthesizer synthesizer;
     private String soundFontPath;
+    private final List<String> availableInstruments = new ArrayList<>();
+    private String preferredInstrumentName = "Grand Piano";
+    private VelCurve velocityCurve = VelCurve.LINEAR;
     private boolean playbackActive;
 
     public SessionController(MidiService midiService,
@@ -116,7 +124,8 @@ public class SessionController {
         this.replayStopButton = replayStopButton;
         this.soundFontPath = midiService.getCurrentSoundFontPath();
 
-        this.keyFallCanvas.setOnImpact(keyboardView::flash);
+        this.keyFallCanvas.setOnImpact((note, intensity) -> keyboardView.flash(note, intensity));
+        this.keyFallCanvas.setVelocityCurve(velocityCurve);
 
         configureFallDurationSlider();
         configurePlaybackControls();
@@ -179,29 +188,39 @@ public class SessionController {
 
     private void initialiseSynth() {
         try {
-            synthesizer = midiService.ensureSynth(soundFontPath);
+            midiService.initSynth(soundFontPath);
+            synthesizer = midiService.getSynthesizer();
             soundFontPath = midiService.getCurrentSoundFontPath();
-            midiReplayer = new MidiReplayer(new MidiReplayer.VisualSink() {
-                @Override
-                public void noteOn(int midi, int velocity, long tNanos) {
-                    keyFallCanvas.onNoteOn(midi, velocity, tNanos);
-                    keyboardView.press(midi);
-                }
-
-                @Override
-                public void noteOff(int midi, long tNanos) {
-                    keyFallCanvas.onNoteOff(midi, tNanos);
-                    keyboardView.release(midi);
-                }
-            }, synthesizer);
-            midiReplayer.setOnFinished(this::onPlaybackFinished);
+            updateAvailableInstruments();
+            midiReplayer = createMidiReplayer();
+            applyInstrumentSelection(preferredInstrumentName);
+            midiReplayer.setProgram(midiService.getCurrentProgram());
+            updateSoundFontStatus();
             refreshPlaybackControls();
-        } catch (MidiUnavailableException | InvalidMidiDataException | IOException ex) {
+        } catch (Exception ex) {
             statusLabel.setText("Synth unavailable: " + ex.getMessage());
             replayPlayButton.setDisable(true);
             replayStopButton.setDisable(true);
             midiReplayer = null;
         }
+    }
+
+    private MidiReplayer createMidiReplayer() throws MidiUnavailableException {
+        MidiReplayer replayer = new MidiReplayer(new MidiReplayer.VisualSink() {
+            @Override
+            public void noteOn(int midi, int velocity, long tNanos) {
+                keyFallCanvas.onNoteOn(midi, velocity, tNanos);
+                keyboardView.press(midi);
+            }
+
+            @Override
+            public void noteOff(int midi, long tNanos) {
+                keyFallCanvas.onNoteOff(midi, tNanos);
+                keyboardView.release(midi);
+            }
+        }, synthesizer);
+        replayer.setOnFinished(this::onPlaybackFinished);
+        return replayer;
     }
 
     private void refreshPlaybackControls() {
@@ -226,6 +245,7 @@ public class SessionController {
             return;
         }
         try {
+            midiReplayer.setProgram(midiService.getCurrentProgram());
             midiReplayer.setSequenceFromRecorded(events, MidiRecorder.PPQ, midiRecorder.getInitialBpm());
             keyFallCanvas.clear();
             midiReplayer.play();
@@ -251,20 +271,102 @@ public class SessionController {
         refreshPlaybackControls();
     }
 
-    private void applySoundFontPath(String candidatePath) {
-        String normalized = candidatePath == null || candidatePath.isBlank() ? null : candidatePath;
-        String previous = soundFontPath;
+    private void applySoundFontSettings(String candidatePath, String requestedInstrument) {
+        String normalized = candidatePath == null || candidatePath.isBlank() ? null : candidatePath.trim();
         try {
-            midiService.reloadSoundFont(normalized);
+            midiService.initSynth(normalized);
+            synthesizer = midiService.getSynthesizer();
             soundFontPath = midiService.getCurrentSoundFontPath();
-            if (soundFontPath == null) {
-                statusLabel.setText("Using default SoundFont");
-            } else {
-                statusLabel.setText("Loaded SoundFont: " + new java.io.File(soundFontPath).getName());
+            updateAvailableInstruments();
+            if (midiReplayer == null) {
+                midiReplayer = createMidiReplayer();
             }
-        } catch (MidiUnavailableException | InvalidMidiDataException | IOException ex) {
-            soundFontPath = previous;
-            statusLabel.setText("SoundFont failed: " + ex.getMessage());
+            applyInstrumentSelection(requestedInstrument);
+            if (midiReplayer != null) {
+                midiReplayer.setProgram(midiService.getCurrentProgram());
+            }
+            updateSoundFontStatus();
+        } catch (Exception ex) {
+            statusLabel.setText("SoundFont failed: " + ex.getMessage() + ". Using default bank.");
+            try {
+                midiService.initSynth(null);
+                synthesizer = midiService.getSynthesizer();
+                soundFontPath = midiService.getCurrentSoundFontPath();
+                updateAvailableInstruments();
+                if (midiReplayer == null) {
+                    midiReplayer = createMidiReplayer();
+                }
+                applyInstrumentSelection(null);
+                if (midiReplayer != null) {
+                    midiReplayer.setProgram(midiService.getCurrentProgram());
+                }
+                updateSoundFontStatus();
+            } catch (Exception fallbackEx) {
+                statusLabel.setText("Synth unavailable: " + fallbackEx.getMessage());
+            }
+        }
+    }
+
+    private void updateAvailableInstruments() {
+        availableInstruments.clear();
+        availableInstruments.addAll(midiService.getInstrumentNames());
+        ensureInstrumentListed(preferredInstrumentName);
+    }
+
+    private void applyInstrumentSelection(String requestedInstrument) {
+        if (requestedInstrument != null && !requestedInstrument.isBlank()) {
+            preferredInstrumentName = requestedInstrument;
+        }
+        if (preferredInstrumentName == null || preferredInstrumentName.isBlank()) {
+            preferredInstrumentName = pickDefaultInstrumentName();
+        }
+        ensureInstrumentListed(preferredInstrumentName);
+        String applied = midiService.applyInstrument(preferredInstrumentName, 0);
+        preferredInstrumentName = applied;
+        ensureInstrumentListed(preferredInstrumentName);
+    }
+
+    private void ensureInstrumentListed(String name) {
+        if (name == null || name.isBlank()) {
+            return;
+        }
+        for (String existing : availableInstruments) {
+            if (existing.equalsIgnoreCase(name)) {
+                return;
+            }
+        }
+        availableInstruments.add(name);
+    }
+
+    private String pickDefaultInstrumentName() {
+        if (availableInstruments.isEmpty()) {
+            return preferredInstrumentName != null ? preferredInstrumentName : "Grand Piano";
+        }
+        for (String name : availableInstruments) {
+            String lower = name.toLowerCase(Locale.ROOT);
+            if (lower.contains("grand")) {
+                return name;
+            }
+        }
+        for (String name : availableInstruments) {
+            String lower = name.toLowerCase(Locale.ROOT);
+            if (lower.contains("piano")) {
+                return name;
+            }
+        }
+        return availableInstruments.get(0);
+    }
+
+    private void updateSoundFontStatus() {
+        if (statusLabel == null) {
+            return;
+        }
+        String instrumentLabel = preferredInstrumentName != null ? preferredInstrumentName : "GM Program 0";
+        if (soundFontPath == null) {
+            statusLabel.setText("Using default SoundFont → " + instrumentLabel);
+        } else {
+            String name = new File(soundFontPath).getName();
+            statusLabel.setText("Loaded SoundFont: " + name + " → " + instrumentLabel);
         }
     }
 
@@ -496,7 +598,13 @@ public class SessionController {
     }
 
     public void showSettingsDialog(Node owner) {
-        SettingsDialog dialog = new SettingsDialog(videoSettings, soundFontPath, owner);
+        SettingsDialog dialog = new SettingsDialog(
+                videoSettings,
+                soundFontPath,
+                availableInstruments,
+                preferredInstrumentName,
+                velocityCurve,
+                owner);
         dialog.showAndWait().ifPresent(result -> {
             VideoSettings updated = result.videoSettings();
             videoSettings.setOutputDirectory(updated.getOutputDirectory());
@@ -506,8 +614,42 @@ public class SessionController {
             videoSettings.setCrf(updated.getCrf());
             videoSettings.setPreset(updated.getPreset());
             videoSettings.setFfmpegExecutable(updated.getFfmpegExecutable());
-            statusLabel.setText("Updated settings");
-            applySoundFontPath(result.soundFontPath().orElse(null));
+
+            boolean soundSettingsChanged = false;
+            boolean velocityChanged = false;
+
+            String newSoundFont = result.soundFontPath().orElse(null);
+            String newInstrument = result.instrumentName().orElse(null);
+            VelCurve newCurve = result.velocityCurve();
+
+            String normalizedCurrent = soundFontPath == null ? null : soundFontPath;
+            String normalizedNew = (newSoundFont == null || newSoundFont.isBlank()) ? null : newSoundFont.trim();
+            if (!Objects.equals(normalizedCurrent, normalizedNew)) {
+                applySoundFontSettings(newSoundFont, newInstrument);
+                soundSettingsChanged = true;
+            } else if (newInstrument != null && (preferredInstrumentName == null
+                    || !newInstrument.equalsIgnoreCase(preferredInstrumentName))) {
+                applyInstrumentSelection(newInstrument);
+                if (midiReplayer != null) {
+                    midiReplayer.setProgram(midiService.getCurrentProgram());
+                }
+                updateSoundFontStatus();
+                soundSettingsChanged = true;
+            }
+
+            if (newCurve != null && newCurve != velocityCurve) {
+                velocityCurve = newCurve;
+                keyFallCanvas.setVelocityCurve(newCurve);
+                velocityChanged = true;
+            }
+
+            if (!soundSettingsChanged && !velocityChanged) {
+                statusLabel.setText("Updated settings");
+            } else if (!soundSettingsChanged && velocityChanged) {
+                String curveLabel = velocityCurve.name().charAt(0)
+                        + velocityCurve.name().substring(1).toLowerCase(Locale.ROOT);
+                statusLabel.setText("Velocity curve: " + curveLabel);
+            }
         });
     }
 
