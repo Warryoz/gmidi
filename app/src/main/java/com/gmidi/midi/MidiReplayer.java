@@ -13,6 +13,7 @@ import javax.sound.midi.Sequence;
 import javax.sound.midi.Sequencer;
 import javax.sound.midi.ShortMessage;
 import javax.sound.midi.Synthesizer;
+import javax.sound.midi.Track;
 import javax.sound.midi.Transmitter;
 import java.io.File;
 import java.io.IOException;
@@ -40,6 +41,8 @@ public final class MidiReplayer implements AutoCloseable {
     private Sequence currentSequence;
     private boolean sequenceFromFile;
     private Path sequenceFile;
+
+    private MidiService.ReverbPreset reverbPreset = MidiService.ReverbPreset.ROOM;
 
     private Runnable finishedListener;
 
@@ -96,12 +99,18 @@ public final class MidiReplayer implements AutoCloseable {
             throws InvalidMidiDataException {
         Sequence sequence = new Sequence(Sequence.PPQ, ppq);
         javax.sound.midi.Track track = sequence.createTrack();
-        insertProgramChange(track);
         MidiEventBuilder builder = new MidiEventBuilder(track);
         for (MidiRecorder.Event event : events) {
             builder.add(event.message(), Math.max(0, event.tick()));
         }
         builder.finish(ppq);
+        try {
+            insertPatchAndReverbAtTick0(sequence, program, reverbPreset);
+        } catch (Exception ex) {
+            InvalidMidiDataException wrapped = new InvalidMidiDataException(ex.getMessage());
+            wrapped.initCause(ex);
+            throw wrapped;
+        }
         sequencer.setSequence(sequence);
         sequencer.setTempoInBPM(bpm);
         sequencer.setTickPosition(0);
@@ -112,6 +121,10 @@ public final class MidiReplayer implements AutoCloseable {
 
     public void setProgram(MidiService.MidiProgram program) {
         this.program = program != null ? program : new MidiService.MidiProgram(0, 0, 0, "GM Program 0");
+    }
+
+    public void setReverbPreset(MidiService.ReverbPreset preset) {
+        this.reverbPreset = preset != null ? preset : MidiService.ReverbPreset.ROOM;
     }
 
     public void play() {
@@ -183,6 +196,13 @@ public final class MidiReplayer implements AutoCloseable {
     public void loadSequenceFromFile(File midiFile) throws IOException, InvalidMidiDataException {
         Objects.requireNonNull(midiFile, "midiFile");
         Sequence sequence = MidiSystem.getSequence(midiFile);
+        try {
+            insertPatchAndReverbAtTick0(sequence, program, reverbPreset);
+        } catch (Exception ex) {
+            InvalidMidiDataException wrapped = new InvalidMidiDataException(ex.getMessage());
+            wrapped.initCause(ex);
+            throw wrapped;
+        }
         sequencer.setSequence(sequence);
         sequencer.setTempoFactor(1.0f);
         sequencer.setTickPosition(0);
@@ -247,14 +267,6 @@ public final class MidiReplayer implements AutoCloseable {
         }
     }
 
-    private void insertProgramChange(javax.sound.midi.Track track) throws InvalidMidiDataException {
-        MidiService.MidiProgram patch = program;
-        if (patch == null) {
-            patch = new MidiService.MidiProgram(0, 0, 0, "GM Program 0");
-        }
-        addProgramEvents(track, patch);
-    }
-
     private int clamp7bit(int value) {
         if (value < 0) {
             return 0;
@@ -265,28 +277,34 @@ public final class MidiReplayer implements AutoCloseable {
         return value;
     }
 
-    private void ensureProgramEvent(Sequence sequence, MidiService.MidiProgram patch) throws InvalidMidiDataException {
-        if (patch == null) {
-            patch = new MidiService.MidiProgram(0, 0, 0, "GM Program 0");
+    static void insertPatchAndReverbAtTick0(Sequence seq,
+                                            MidiService.MidiProgram prog,
+                                            MidiService.ReverbPreset rv) throws Exception {
+        MidiService.MidiProgram patch = prog != null ? prog : new MidiService.MidiProgram(0, 0, 0, "GM Program 0");
+        MidiService.ReverbPreset preset = rv != null ? rv : MidiService.ReverbPreset.ROOM;
+        boolean[] used = new boolean[16];
+        for (Track track : seq.getTracks()) {
+            for (int i = 0; i < track.size(); i++) {
+                MidiMessage message = track.get(i).getMessage();
+                if (message instanceof ShortMessage sm) {
+                    int ch = sm.getChannel();
+                    if (ch >= 0 && ch < 16) {
+                        used[ch] = true;
+                    }
+                }
+            }
         }
-        javax.sound.midi.Track[] tracks = sequence.getTracks();
-        if (tracks.length == 0) {
-            sequence.createTrack();
-            tracks = sequence.getTracks();
+        Track target = seq.getTracks().length > 0 ? seq.getTracks()[0] : seq.createTrack();
+        for (int ch = 0; ch < 16; ch++) {
+            if (!used[ch] || ch == 9) {
+                continue;
+            }
+            target.add(new MidiEvent(new ShortMessage(ShortMessage.CONTROL_CHANGE, ch, 0, clamp7bit(patch.bankMsb())), 0));
+            target.add(new MidiEvent(new ShortMessage(ShortMessage.CONTROL_CHANGE, ch, 32, clamp7bit(patch.bankLsb())), 0));
+            target.add(new MidiEvent(new ShortMessage(ShortMessage.PROGRAM_CHANGE, ch, clamp7bit(patch.program()), 0), 0));
+            target.add(new MidiEvent(new ShortMessage(ShortMessage.CONTROL_CHANGE, ch, 91, clamp7bit(preset.reverbCc())), 0));
+            target.add(new MidiEvent(new ShortMessage(ShortMessage.CONTROL_CHANGE, ch, 93, clamp7bit(preset.chorusCc())), 0));
         }
-        addProgramEvents(tracks[0], patch);
-    }
-
-    private void addProgramEvents(javax.sound.midi.Track track, MidiService.MidiProgram patch)
-            throws InvalidMidiDataException {
-        if (patch.bankMsb() != 0 || patch.bankLsb() != 0) {
-            ShortMessage bankMsb = new ShortMessage(ShortMessage.CONTROL_CHANGE, 0, 0, clamp7bit(patch.bankMsb()));
-            track.add(new MidiEvent(bankMsb, 0));
-            ShortMessage bankLsb = new ShortMessage(ShortMessage.CONTROL_CHANGE, 0, 32, clamp7bit(patch.bankLsb()));
-            track.add(new MidiEvent(bankLsb, 0));
-        }
-        ShortMessage pc = new ShortMessage(ShortMessage.PROGRAM_CHANGE, 0, clamp7bit(patch.program()), 0);
-        track.add(new MidiEvent(pc, 0));
     }
 
     private static final class VelocityReceiver implements Receiver {

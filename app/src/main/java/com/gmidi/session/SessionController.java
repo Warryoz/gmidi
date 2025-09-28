@@ -1,5 +1,6 @@
 package com.gmidi.session;
 
+import com.gmidi.Prefs;
 import com.gmidi.midi.MidiRecorder;
 import com.gmidi.midi.MidiReplayer;
 import com.gmidi.midi.MidiService;
@@ -117,13 +118,17 @@ public class SessionController {
     private final List<String> availableInstruments = new ArrayList<>();
     private String preferredInstrumentName = "Grand Piano";
     private VelCurve velocityCurve = VelCurve.LINEAR;
+    private MidiService.ReverbPreset preferredReverb = MidiService.ReverbPreset.ROOM;
     private boolean playbackActive;
-    private static final double KB_HEIGHT_RATIO = 0.24;
+    private static final double DEFAULT_KB_HEIGHT_RATIO = 0.24;
     private static final double KB_MIN = 140.0;
     private static final double KB_MAX = 260.0;
     private static final String DARK_THEME = Objects.requireNonNull(
             SessionController.class.getResource("/DarkTheme.css"))
             .toExternalForm();
+
+    private double keyboardHeightRatio = DEFAULT_KB_HEIGHT_RATIO;
+    private int visualOffsetMillis;
 
     public SessionController(MidiService midiService,
                              KeyboardView keyboardView,
@@ -163,11 +168,29 @@ public class SessionController {
         this.replayPauseButton = replayPauseButton;
         this.replayStopButton = replayStopButton;
         this.openMidiButton = openMidiButton;
-        this.soundFontPath = midiService.getCurrentSoundFontPath();
+        this.soundFontPath = normalizeSoundFontPath(Prefs.getSoundFontPath());
+        this.preferredInstrumentName = sanitizeInstrumentName(Prefs.progName());
+        this.velocityCurve = resolveVelocityCurve(Prefs.getVelCurve());
+        this.preferredReverb = resolveReverbPreset(Prefs.getReverb());
+        this.keyboardHeightRatio = clampKeyboardHeightRatio(Prefs.getKbRatio());
+        this.visualOffsetMillis = Prefs.getVisualOffsetMillis();
+        double storedFallSeconds = Math.max(1.0, Prefs.getFallSeconds());
+
+        midiService.setVelocityCurve(velocityCurve);
+        midiService.setTranspose(Prefs.getTranspose());
+
+        Path storedDir = resolveDirectory(Prefs.getLastExportDir());
+        if (storedDir != null) {
+            videoSettings.setOutputDirectory(storedDir);
+        }
 
         this.keyFallCanvas.setOnImpact((note, intensity) -> keyboardView.flash(note, intensity));
         this.keyFallCanvas.setVelocityCurve(velocityCurve);
-        midiService.setVelocityCurve(velocityCurve);
+        this.keyFallCanvas.setVisualOffsetMillis(visualOffsetMillis);
+        this.keyFallCanvas.setFallDurationSeconds(storedFallSeconds);
+        if (fallDurationSlider != null) {
+            fallDurationSlider.setValue(storedFallSeconds);
+        }
 
         configureViewportLayout();
         configureFallDurationSlider();
@@ -230,6 +253,8 @@ public class SessionController {
             resolvedPane = new StackPane();
         }
 
+        resolvedPane.setMinSize(100, 100);
+
         Rectangle clip = new Rectangle();
         clip.widthProperty().bind(resolvedPane.widthProperty());
         clip.heightProperty().bind(resolvedPane.heightProperty());
@@ -241,6 +266,84 @@ public class SessionController {
         keyFallCanvas.setMouseTransparent(true);
 
         keyFallCanvas.bindTo(resolvedPane);
+    }
+
+    private String normalizeSoundFontPath(String path) {
+        if (path == null) {
+            return null;
+        }
+        String trimmed = path.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private String sanitizeInstrumentName(String name) {
+        if (name == null || name.isBlank()) {
+            return "Grand Piano";
+        }
+        return name;
+    }
+
+    private VelCurve resolveVelocityCurve(String value) {
+        if (value == null || value.isBlank()) {
+            return VelCurve.LINEAR;
+        }
+        try {
+            return VelCurve.valueOf(value.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException ex) {
+            return VelCurve.LINEAR;
+        }
+    }
+
+    private MidiService.ReverbPreset resolveReverbPreset(String label) {
+        if (label != null && !label.isBlank()) {
+            for (MidiService.ReverbPreset preset : MidiService.ReverbPreset.values()) {
+                if (preset.toString().equalsIgnoreCase(label)
+                        || preset.name().equalsIgnoreCase(label)) {
+                    return preset;
+                }
+            }
+        }
+        return MidiService.ReverbPreset.ROOM;
+    }
+
+    private Path resolveDirectory(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Paths.get(value.trim());
+        } catch (InvalidPathException ex) {
+            return null;
+        }
+    }
+
+    private double clampKeyboardHeightRatio(double ratio) {
+        if (!Double.isFinite(ratio)) {
+            return DEFAULT_KB_HEIGHT_RATIO;
+        }
+        if (ratio < 0.05) {
+            return 0.05;
+        }
+        if (ratio > 0.6) {
+            return 0.6;
+        }
+        return ratio;
+    }
+
+    private void refreshKeyboardHeightBinding() {
+        Scene scene = keyboardView.getScene();
+        if (scene == null) {
+            return;
+        }
+        keyboardView.prefHeightProperty().unbind();
+        bindResponsiveKeyboardHeight(scene, keyboardView);
+    }
+
+    private void persistCurrentProgram() {
+        MidiService.MidiProgram current = midiService.getCurrentProgram();
+        if (current != null) {
+            Prefs.putProgram(current.bankMsb(), current.bankLsb(), current.program(), current.displayName());
+        }
     }
 
     private void configureFallDurationSlider() {
@@ -257,6 +360,7 @@ public class SessionController {
         fallDurationSlider.valueProperty().addListener((obs, oldV, newV) -> {
             double seconds = Math.max(1.0, newV.doubleValue());
             updateFallDurationLabel(seconds);
+            Prefs.putFallSeconds(seconds);
         });
     }
 
@@ -281,7 +385,8 @@ public class SessionController {
 
     private void bindResponsiveKeyboardHeight(Scene scene, KeyboardView kb) {
         var kbHeight = Bindings.createDoubleBinding(() -> {
-            double h = scene.getHeight() * KB_HEIGHT_RATIO;
+            double ratio = clampKeyboardHeightRatio(keyboardHeightRatio);
+            double h = scene.getHeight() * ratio;
             if (h < KB_MIN) {
                 h = KB_MIN;
             }
@@ -326,10 +431,19 @@ public class SessionController {
             midiService.initSynth(soundFontPath);
             synthesizer = midiService.getSynthesizer();
             soundFontPath = midiService.getCurrentSoundFontPath();
+            Prefs.putSoundFontPath(soundFontPath);
             updateAvailableInstruments();
-            midiReplayer = createMidiReplayer();
+            if (midiReplayer == null) {
+                midiReplayer = createMidiReplayer();
+            }
             applyInstrumentSelection(preferredInstrumentName);
-            midiReplayer.setProgram(midiService.getCurrentProgram());
+            if (midiReplayer != null) {
+                midiReplayer.setProgram(midiService.getCurrentProgram());
+                midiReplayer.setReverbPreset(preferredReverb);
+            }
+            midiService.setReverbPreset(preferredReverb);
+            preferredReverb = midiService.getReverbPreset();
+            Prefs.putReverb(preferredReverb.toString());
             updateSoundFontStatus();
             refreshPlaybackControls();
         } catch (Exception ex) {
@@ -360,6 +474,7 @@ public class SessionController {
                 Platform.runLater(this::refreshPlaybackControls);
             }
         });
+        replayer.setReverbPreset(preferredReverb);
         return replayer;
     }
 
@@ -496,7 +611,12 @@ public class SessionController {
             applyInstrumentSelection(requestedInstrument);
             if (midiReplayer != null) {
                 midiReplayer.setProgram(midiService.getCurrentProgram());
+                midiReplayer.setReverbPreset(preferredReverb);
             }
+            midiService.setReverbPreset(preferredReverb);
+            preferredReverb = midiService.getReverbPreset();
+            Prefs.putReverb(preferredReverb.toString());
+            Prefs.putSoundFontPath(soundFontPath);
             updateSoundFontStatus();
         } catch (Exception ex) {
             statusLabel.setText("SoundFont failed: " + ex.getMessage() + ". Using default bank.");
@@ -511,7 +631,12 @@ public class SessionController {
                 applyInstrumentSelection(null);
                 if (midiReplayer != null) {
                     midiReplayer.setProgram(midiService.getCurrentProgram());
+                    midiReplayer.setReverbPreset(preferredReverb);
                 }
+                midiService.setReverbPreset(preferredReverb);
+                preferredReverb = midiService.getReverbPreset();
+                Prefs.putReverb(preferredReverb.toString());
+                Prefs.putSoundFontPath(soundFontPath);
                 updateSoundFontStatus();
             } catch (Exception fallbackEx) {
                 statusLabel.setText("Synth unavailable: " + fallbackEx.getMessage());
@@ -532,10 +657,12 @@ public class SessionController {
         if (preferredInstrumentName == null || preferredInstrumentName.isBlank()) {
             preferredInstrumentName = pickDefaultInstrumentName();
         }
+        preferredInstrumentName = sanitizeInstrumentName(preferredInstrumentName);
         ensureInstrumentListed(preferredInstrumentName);
-        String applied = midiService.applyInstrument(preferredInstrumentName, 0);
-        preferredInstrumentName = applied;
+        String applied = midiService.applyInstrument(preferredInstrumentName, Prefs.program());
+        preferredInstrumentName = sanitizeInstrumentName(applied);
         ensureInstrumentListed(preferredInstrumentName);
+        persistCurrentProgram();
     }
 
     private void ensureInstrumentListed(String name) {
@@ -717,6 +844,7 @@ public class SessionController {
             }
         }
         Path outputDir = Optional.ofNullable(videoSettings.getOutputDirectory()).orElse(Paths.get("recordings"));
+        Prefs.putLastExportDir(outputDir.toString());
         String baseName;
         if (capturingLive && currentMidiFile != null) {
             baseName = stripExtension(currentMidiFile.getFileName().toString());
@@ -784,6 +912,8 @@ public class SessionController {
             return;
         }
 
+        Prefs.putLastExportDir(outputDir.toString());
+
         Path audioTemp = outputDir.resolve(baseName + "-audio.wav");
         Path videoTemp = outputDir.resolve(baseName + "-video.mp4");
         currentVideoFile = finalVideo;
@@ -820,14 +950,15 @@ public class SessionController {
                 Sequence prepared = OfflineAudioRenderer.prepareSequence(
                         exportSequence,
                         midiService.getCurrentProgram(),
+                        midiService.getReverbPreset(),
                         midiService.getTranspose());
                 OfflineAudioRenderer.renderWav(
                         exportSequence,
                         midiService.getCurrentProgram(),
+                        midiService.getReverbPreset(),
                         midiService.getTranspose(),
                         midiService.getVelocityMap(),
-                        midiService.getReverbPreset(),
-                        midiService.getCustomSoundbank(),
+                        midiService.getCustomSoundbankOrNull(),
                         audioTempPath.toFile());
                 List<TimedNoteEvent> events = buildTimedNoteEvents(prepared, midiService.getVelocityMap());
                 renderFramesToVideo(events, videoTempPath, exportFps, exportFrameWidth, exportFrameHeight, exportScale, exportTailMicros);
@@ -1227,6 +1358,8 @@ public class SessionController {
                 velocityCurve,
                 midiService.getTranspose(),
                 midiService.getReverbPreset(),
+                keyboardHeightRatio,
+                visualOffsetMillis,
                 owner);
         dialog.showAndWait().ifPresent(result -> {
             VideoSettings updated = result.videoSettings();
@@ -1237,17 +1370,24 @@ public class SessionController {
             videoSettings.setCrf(updated.getCrf());
             videoSettings.setPreset(updated.getPreset());
             videoSettings.setFfmpegExecutable(updated.getFfmpegExecutable());
+            if (updated.getOutputDirectory() != null) {
+                Prefs.putLastExportDir(updated.getOutputDirectory().toString());
+            }
 
             boolean soundSettingsChanged = false;
             boolean velocityChanged = false;
             boolean transposeChanged = false;
             boolean reverbChanged = false;
+            boolean keyboardChanged = false;
+            boolean offsetChanged = false;
 
             String newSoundFont = result.soundFontPath().orElse(null);
             String newInstrument = result.instrumentName().orElse(null);
             VelCurve newCurve = result.velocityCurve();
             int requestedTranspose = result.transposeSemis();
             ReverbPreset requestedPreset = result.reverbPreset();
+            double requestedKeyboardRatio = result.keyboardHeightRatio();
+            int requestedVisualOffset = result.visualOffsetMillis();
             int previousTranspose = midiService.getTranspose();
             ReverbPreset previousPreset = midiService.getReverbPreset();
 
@@ -1261,7 +1401,11 @@ public class SessionController {
                 applyInstrumentSelection(newInstrument);
                 if (midiReplayer != null) {
                     midiReplayer.setProgram(midiService.getCurrentProgram());
+                    midiReplayer.setReverbPreset(preferredReverb);
                 }
+                midiService.setReverbPreset(preferredReverb);
+                preferredReverb = midiService.getReverbPreset();
+                Prefs.putReverb(preferredReverb.toString());
                 updateSoundFontStatus();
                 soundSettingsChanged = true;
             }
@@ -1270,17 +1414,39 @@ public class SessionController {
                 velocityCurve = newCurve;
                 keyFallCanvas.setVelocityCurve(newCurve);
                 midiService.setVelocityCurve(newCurve);
+                Prefs.putVelCurve(newCurve.name());
                 velocityChanged = true;
             }
 
             if (requestedTranspose != previousTranspose) {
                 midiService.setTranspose(requestedTranspose);
+                Prefs.putTranspose(requestedTranspose);
                 transposeChanged = true;
             }
 
             if (requestedPreset != null && requestedPreset != previousPreset) {
                 midiService.setReverbPreset(requestedPreset);
+                preferredReverb = midiService.getReverbPreset();
+                if (midiReplayer != null) {
+                    midiReplayer.setReverbPreset(preferredReverb);
+                }
+                Prefs.putReverb(preferredReverb.toString());
                 reverbChanged = true;
+            }
+
+            double clampedRatio = clampKeyboardHeightRatio(requestedKeyboardRatio);
+            if (Math.abs(clampedRatio - keyboardHeightRatio) > 1e-4) {
+                keyboardHeightRatio = clampedRatio;
+                Prefs.putKbRatio(keyboardHeightRatio);
+                refreshKeyboardHeightBinding();
+                keyboardChanged = true;
+            }
+
+            if (requestedVisualOffset != visualOffsetMillis) {
+                visualOffsetMillis = requestedVisualOffset;
+                keyFallCanvas.setVisualOffsetMillis(visualOffsetMillis);
+                Prefs.putVisualOffsetMillis(visualOffsetMillis);
+                offsetChanged = true;
             }
 
             StringBuilder feedback = new StringBuilder();
@@ -1306,6 +1472,18 @@ public class SessionController {
                     feedback.append(" · ");
                 }
                 feedback.append("Reverb: ").append(requestedPreset);
+            }
+            if (keyboardChanged) {
+                if (feedback.length() > 0) {
+                    feedback.append(" · ");
+                }
+                feedback.append(String.format("Keyboard %.0f%%", keyboardHeightRatio * 100.0));
+            }
+            if (offsetChanged) {
+                if (feedback.length() > 0) {
+                    feedback.append(" · ");
+                }
+                feedback.append(String.format("Visual offset: %+d ms", visualOffsetMillis));
             }
             if (feedback.length() == 0) {
                 statusLabel.setText("Updated settings");

@@ -24,6 +24,7 @@ import javafx.scene.layout.Priority;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.FileChooser;
 import javafx.stage.Window;
+import javafx.util.StringConverter;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -57,6 +58,8 @@ public class SettingsDialog extends Dialog<SettingsDialog.Result> {
                          VelCurve currentCurve,
                          int currentTranspose,
                          MidiService.ReverbPreset reverbPreset,
+                         double currentKeyboardRatio,
+                         int currentVisualOffset,
                          Node owner) {
         setTitle("Recorder Settings");
         getDialogPane().getButtonTypes().addAll(ButtonType.CANCEL, ButtonType.OK);
@@ -198,8 +201,40 @@ public class SettingsDialog extends Dialog<SettingsDialog.Result> {
         reverbChoice.setValue(reverbPreset == null ? MidiService.ReverbPreset.ROOM : reverbPreset);
         grid.addRow(9, new Label("Reverb"), reverbChoice);
 
-        grid.addRow(10, new Label("FFmpeg path"), ffmpegField);
-        grid.add(ffmpegStatus, 1, 11, 2, 1);
+        double clampedRatio = clampKeyboardRatio(currentKeyboardRatio);
+        SpinnerValueFactory.DoubleSpinnerValueFactory keyboardFactory =
+                new SpinnerValueFactory.DoubleSpinnerValueFactory(0.10, 0.45, clampedRatio, 0.01);
+        keyboardFactory.setConverter(new StringConverter<>() {
+            @Override
+            public String toString(Double value) {
+                if (value == null) {
+                    return "0.24";
+                }
+                return String.format("%.2f", value);
+            }
+
+            @Override
+            public Double fromString(String value) {
+                try {
+                    return Double.parseDouble(value);
+                } catch (NumberFormatException ex) {
+                    return clampedRatio;
+                }
+            }
+        });
+        Spinner<Double> keyboardRatioSpinner = new Spinner<>(keyboardFactory);
+        keyboardRatioSpinner.setEditable(true);
+        keyboardRatioSpinner.getEditor().setPrefColumnCount(6);
+        grid.addRow(10, new Label("Keyboard height"), keyboardRatioSpinner);
+
+        SpinnerValueFactory.IntegerSpinnerValueFactory offsetFactory =
+                new SpinnerValueFactory.IntegerSpinnerValueFactory(-80, 80, currentVisualOffset, 5);
+        Spinner<Integer> visualOffsetSpinner = new Spinner<>(offsetFactory);
+        visualOffsetSpinner.setEditable(false);
+        grid.addRow(11, new Label("Visual offset (ms)"), visualOffsetSpinner);
+
+        grid.addRow(12, new Label("FFmpeg path"), ffmpegField);
+        grid.add(ffmpegStatus, 1, 13, 2, 1);
 
         getDialogPane().setContent(grid);
 
@@ -245,8 +280,24 @@ public class SettingsDialog extends Dialog<SettingsDialog.Result> {
             int transpose = transposeSpinner.getValue();
             MidiService.ReverbPreset chosenPreset =
                     reverbChoice.getValue() == null ? MidiService.ReverbPreset.ROOM : reverbChoice.getValue();
-            return new Result(updated, resolvedSoundFont, chosenInstrument, chosenCurve, transpose, chosenPreset);
+            double ratioValue = clampKeyboardRatio(keyboardRatioSpinner.getValue());
+            int offsetValue = visualOffsetSpinner.getValue();
+            return new Result(updated, resolvedSoundFont, chosenInstrument, chosenCurve, transpose, chosenPreset,
+                    ratioValue, offsetValue);
         });
+    }
+
+    private double clampKeyboardRatio(double ratio) {
+        if (!Double.isFinite(ratio)) {
+            return 0.24;
+        }
+        if (ratio < 0.10) {
+            return 0.10;
+        }
+        if (ratio > 0.45) {
+            return 0.45;
+        }
+        return ratio;
     }
 
     private void applyDarkTheme(Scene scene) {
@@ -262,19 +313,25 @@ public class SettingsDialog extends Dialog<SettingsDialog.Result> {
         private final VelCurve velocityCurve;
         private final int transposeSemis;
         private final MidiService.ReverbPreset reverbPreset;
+        private final double keyboardHeightRatio;
+        private final int visualOffsetMillis;
 
         Result(VideoSettings videoSettings,
                String soundFontPath,
                String instrumentName,
                VelCurve velocityCurve,
                int transposeSemis,
-               MidiService.ReverbPreset reverbPreset) {
+               MidiService.ReverbPreset reverbPreset,
+               double keyboardHeightRatio,
+               int visualOffsetMillis) {
             this.videoSettings = videoSettings;
             this.soundFontPath = soundFontPath;
             this.instrumentName = instrumentName;
             this.velocityCurve = velocityCurve;
             this.transposeSemis = transposeSemis;
             this.reverbPreset = reverbPreset;
+            this.keyboardHeightRatio = keyboardHeightRatio;
+            this.visualOffsetMillis = visualOffsetMillis;
         }
 
         public VideoSettings videoSettings() {
@@ -299,6 +356,14 @@ public class SettingsDialog extends Dialog<SettingsDialog.Result> {
 
         public MidiService.ReverbPreset reverbPreset() {
             return reverbPreset;
+        }
+
+        public double keyboardHeightRatio() {
+            return keyboardHeightRatio;
+        }
+
+        public int visualOffsetMillis() {
+            return visualOffsetMillis;
         }
     }
 
