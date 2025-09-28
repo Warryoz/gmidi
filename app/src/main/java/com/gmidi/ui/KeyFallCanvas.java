@@ -44,13 +44,13 @@ public class KeyFallCanvas extends Canvas {
     @SuppressWarnings("unchecked")
     private final Deque<NoteSprite>[] activePerNote = new Deque[128];
 
+    private Region boundViewport;
     private final InvalidationListener viewportBoundsListener = obs -> {
         if (boundViewport != null) {
             scheduleViewportApply(boundViewport.getLayoutBounds());
         }
     };
 
-    private Region boundViewport;
     private boolean sustainPedal;
     private double windowSeconds = DEFAULT_WINDOW_SECONDS;
     private boolean renderRequested = true;
