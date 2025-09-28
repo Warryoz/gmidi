@@ -1535,6 +1535,7 @@ public class SessionController {
     private final class FrameRenderer {
         private final List<MidiReplayer.VisualNote> notes;
         private final long travelMicros;
+        private final List<MidiReplayer.VisualNote> releaseOrder;
         private int nextSpawn;
         private int nextPress;
         private int nextRelease;
@@ -1542,6 +1543,9 @@ public class SessionController {
         FrameRenderer(List<MidiReplayer.VisualNote> notes, long travelMicros) {
             this.notes = notes;
             this.travelMicros = Math.max(1L, travelMicros);
+            this.releaseOrder = new ArrayList<>(notes);
+            this.releaseOrder.sort(Comparator.comparingLong(MidiReplayer.VisualNote::offMicros)
+                    .thenComparingLong(MidiReplayer.VisualNote::onMicros));
         }
 
         void reset() {
@@ -1571,8 +1575,9 @@ public class SessionController {
                 keyboardView.press(notes.get(nextPress).midi());
                 nextPress++;
             }
-            while (nextRelease < notes.size() && notes.get(nextRelease).offMicros() <= micros) {
-                keyboardView.release(notes.get(nextRelease).midi());
+            while (nextRelease < releaseOrder.size()
+                    && releaseOrder.get(nextRelease).offMicros() <= micros) {
+                keyboardView.release(releaseOrder.get(nextRelease).midi());
                 nextRelease++;
             }
         }
