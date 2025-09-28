@@ -140,7 +140,7 @@ public final class OfflineAudioRenderer {
                                     }
                                     Thread.sleep(100);
                                 }
-                            } catch (InterruptedException ignored) {
+                            } catch (InterruptedException s) {
                                 Thread.currentThread().interrupt();
                             }
                         }, "gmidi-audio-progress");
