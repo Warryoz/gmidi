@@ -229,6 +229,16 @@ public class SessionController {
         currentVideoFile = outputDir.resolve(baseName + ".mp4");
         videoRecorder = new VideoRecorder();
         try {
+            double captureWidth = captureNode.getLayoutBounds().getWidth();
+            double captureHeight = captureNode.getLayoutBounds().getHeight();
+            int viewportW = (int) Math.round(captureWidth);
+            int viewportH = (int) Math.round(captureHeight);
+            System.out.printf("[Session] Capture viewport: %dx%d (video target %dx%d @ %d FPS)%n",
+                    viewportW,
+                    viewportH,
+                    videoSettings.getWidth(),
+                    videoSettings.getHeight(),
+                    videoSettings.getFps());
             videoRecorder.start(currentVideoFile, videoSettings);
             videoFrameIntervalNanos = Math.max(1L, Math.round(1_000_000_000.0 / Math.max(1, videoSettings.getFps())));
             lastVideoCaptureNanos = 0;

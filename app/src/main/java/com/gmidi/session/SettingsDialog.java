@@ -1,6 +1,8 @@
 package com.gmidi.session;
 
+import com.gmidi.video.FfmpegLocator;
 import com.gmidi.video.VideoSettings;
+import javafx.application.Platform;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
 import javafx.geometry.Insets;
@@ -16,16 +18,25 @@ import javafx.scene.layout.Priority;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.Window;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.IOException;
+import java.io.InputStreamReader;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Modal dialog that exposes basic encoder configuration such as resolution, FPS, preset, and output
  * directory.
  */
 public class SettingsDialog extends Dialog<VideoSettings> {
+
+    private final AtomicLong ffmpegProbeCounter = new AtomicLong();
 
     public SettingsDialog(VideoSettings current, Node owner) {
         setTitle("Recorder Settings");
@@ -92,6 +103,8 @@ public class SettingsDialog extends Dialog<VideoSettings> {
                 ? ""
                 : current.getFfmpegExecutable().toString());
         ffmpegField.setPromptText("Optional: path to ffmpeg executable");
+        Label ffmpegStatus = new Label();
+        ffmpegStatus.setWrapText(true);
 
         grid.addRow(0, new Label("Recordings folder"), outputField, browse);
         GridPane.setHgrow(outputField, Priority.ALWAYS);
@@ -100,8 +113,16 @@ public class SettingsDialog extends Dialog<VideoSettings> {
         grid.addRow(3, new Label("x264 preset"), presetChoice);
         grid.addRow(4, new Label("CRF"), crfField);
         grid.addRow(5, new Label("FFmpeg path"), ffmpegField);
+        grid.add(ffmpegStatus, 1, 6, 2, 1);
 
         getDialogPane().setContent(grid);
+
+        ffmpegField.textProperty().addListener((obs, oldText, newText) -> {
+            if (!Objects.equals(oldText, newText)) {
+                updateFfmpegStatus(newText, ffmpegStatus);
+            }
+        });
+        updateFfmpegStatus(ffmpegField.getText(), ffmpegStatus);
 
         setResultConverter(button -> {
             if (button != ButtonType.OK) {
@@ -133,6 +154,71 @@ public class SettingsDialog extends Dialog<VideoSettings> {
             }
             return updated;
         });
+    }
+
+    private void updateFfmpegStatus(String override, Label statusLabel) {
+        String trimmed = override == null ? "" : override.trim();
+        long token = ffmpegProbeCounter.incrementAndGet();
+        statusLabel.setText(trimmed.isEmpty() ? "Checking FFmpeg (default paths)…" : "Checking FFmpeg override…");
+        CompletableFuture
+                .supplyAsync(() -> probeFfmpeg(trimmed))
+                .whenComplete((result, error) -> Platform.runLater(() -> {
+                    if (ffmpegProbeCounter.get() != token) {
+                        return;
+                    }
+                    if (error != null) {
+                        String message = error.getMessage();
+                        if (message == null || message.isBlank()) {
+                            message = error.toString();
+                        }
+                        statusLabel.setText("FFmpeg check failed: " + message);
+                        return;
+                    }
+                    statusLabel.setText(result.ok
+                            ? "FFmpeg OK: " + result.message
+                            : "FFmpeg unavailable: " + result.message);
+                }));
+    }
+
+    private ProbeResult probeFfmpeg(String override) {
+        String effective = FfmpegLocator.effectiveExecutable(override.isEmpty() ? null : override);
+        ProcessBuilder builder = new ProcessBuilder(effective, "-version");
+        builder.redirectErrorStream(true);
+        Process process = null;
+        try {
+            process = builder.start();
+            String versionLine = null;
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (versionLine == null && !line.isBlank()) {
+                        versionLine = line.trim();
+                    }
+                }
+            }
+            if (!process.waitFor(3, TimeUnit.SECONDS)) {
+                process.destroyForcibly();
+                return new ProbeResult(false, "Timed out probing " + effective);
+            }
+            int exit = process.exitValue();
+            if (exit == 0) {
+                String detail = versionLine != null ? versionLine : "version check succeeded";
+                return new ProbeResult(true, effective + " (" + detail + ")");
+            }
+            return new ProbeResult(false, "ffmpeg exited with code " + exit + " when probing " + effective);
+        } catch (IOException ex) {
+            return new ProbeResult(false, "Unable to run " + effective + ": " + ex.getMessage());
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            return new ProbeResult(false, "Probe interrupted");
+        } finally {
+            if (process != null && process.isAlive()) {
+                process.destroyForcibly();
+            }
+        }
+    }
+
+    private record ProbeResult(boolean ok, String message) {
     }
 
     private int parseInt(String value, int fallback) {
