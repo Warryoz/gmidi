@@ -1,7 +1,7 @@
 package com.gmidi.session;
 
 import com.gmidi.midi.MidiService;
-import com.gmidi.ui.KeyFallCanvas.VelCurve;
+import com.gmidi.midi.VelCurve;
 import com.gmidi.video.FfmpegLocator;
 import com.gmidi.video.VideoSettings;
 import javafx.application.Platform;

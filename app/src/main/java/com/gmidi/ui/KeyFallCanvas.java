@@ -1,5 +1,6 @@
 package com.gmidi.ui;
 
+import com.gmidi.midi.VelCurve;
 import javafx.animation.AnimationTimer;
 import javafx.beans.InvalidationListener;
 import javafx.geometry.Bounds;
@@ -235,7 +236,7 @@ public class KeyFallCanvas extends Canvas {
         note.spawnMicros = resolveTimestampMicros(tNanos);
         note.impacted = false;
         note.impactMicros = 0;
-        int clampedVelocity = Math.max(1, Math.min(127, velocity));
+        int clampedVelocity = Math.max(0, Math.min(127, velocity));
         double mapped = mapVelocity(clampedVelocity);
         note.trailThickness = lerp(MIN_TRAIL_THICKNESS, MAX_TRAIL_THICKNESS, mapped);
         note.baseAlpha = lerp(MIN_TRAIL_ALPHA, MAX_TRAIL_ALPHA, mapped);
@@ -437,19 +438,13 @@ public class KeyFallCanvas extends Canvas {
         double intensity;
     }
 
-    public enum VelCurve {
-        LINEAR,
-        SOFT,
-        HARD // Add more entries here to experiment with custom curves.
-    }
-
     private double mapVelocity(int velocity) {
-        double x = clamp(velocity, 1, 127) / 127.0;
-        return switch (velCurve) {
-            case SOFT -> Math.sqrt(x);
-            case HARD -> x * x;
-            default -> x;
-        };
+        if (velocity <= 0) {
+            return 0.0;
+        }
+        int clamped = Math.max(1, Math.min(127, velocity));
+        double norm = (clamped - 1) / 126.0;
+        return clamp(norm, 0.0, 1.0);
     }
 
     private double lerp(double min, double max, double t) {
