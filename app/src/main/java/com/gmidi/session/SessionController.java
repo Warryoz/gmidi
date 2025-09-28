@@ -522,7 +522,6 @@ public class SessionController {
         if (midiReplayer.isAtEnd()) {
             midiReplayer.rewind();
         }
-        keyFallCanvas.clear();
         useSequencerClock();
         midiReplayer.play();
         playbackActive = true;

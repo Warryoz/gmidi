@@ -482,7 +482,9 @@ public class KeyFallCanvas extends Canvas {
             note = new FallingNote();
         }
         note.midi = midi;
-        positionForMidi(midi, x -> note.x = x, w -> note.w = w);
+        FallingNote finalNote = note;
+        FallingNote finalNote1 = note;
+        positionForMidi(midi, x -> finalNote.x = x, w -> finalNote1.w = w);
         note.spawnMicros = spawnMicros;
         note.impactMicros = Math.max(0L, impactMicros);
         note.releaseMicros = Math.max(note.impactMicros, releaseMicros);
