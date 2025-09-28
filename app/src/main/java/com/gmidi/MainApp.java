@@ -70,7 +70,7 @@ public class MainApp extends Application {
 
         Label fallDurationLabel = new Label("Fall: 10.0s");
         fallDurationLabel.getStyleClass().add("info-label");
-        Slider fallDurationSlider = new Slider(3.0, 20.0, 10.0);
+        Slider fallDurationSlider = new Slider(0.1, 20.0, 10.0);
         fallDurationSlider.setPrefWidth(180);
         fallDurationSlider.setBlockIncrement(0.5);
         fallDurationSlider.setShowTickMarks(false);

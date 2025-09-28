@@ -2,6 +2,7 @@ module com.gmidi {
     requires java.desktop;
     requires javafx.controls;
     requires javafx.graphics;
+    requires java.prefs;
 
     exports com.gmidi;
     exports com.gmidi.midi;

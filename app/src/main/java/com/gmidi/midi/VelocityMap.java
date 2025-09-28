@@ -22,7 +22,7 @@ public final class VelocityMap {
         if (velocity <= 0) {
             return 0;
         }
-        double x = Math.max(1, Math.min(127, velocity)) / 127.0;
+        double x = Math.min(127, velocity) / 127.0;
         double y = switch (curve) {
             case SOFT -> Math.sqrt(x);
             case HARD -> x * x;

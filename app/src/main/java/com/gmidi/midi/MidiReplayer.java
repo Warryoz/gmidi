@@ -267,7 +267,7 @@ public final class MidiReplayer implements AutoCloseable {
         }
     }
 
-    private int clamp7bit(int value) {
+    private static int clamp7bit(int value) {
         if (value < 0) {
             return 0;
         }

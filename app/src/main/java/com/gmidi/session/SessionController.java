@@ -48,9 +48,7 @@ import javax.sound.midi.ShortMessage;
 import javax.sound.midi.Synthesizer;
 import java.io.File;
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.nio.file.*;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -62,7 +60,6 @@ import java.util.Comparator;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
-import java.nio.file.StandardCopyOption;
 
 /**
  * Coordinates MIDI input, recording, the piano visualiser, and video capture. The controller is the
@@ -306,15 +303,11 @@ public class SessionController {
         return MidiService.ReverbPreset.ROOM;
     }
 
-    private Path resolveDirectory(String value) {
+    private Path resolveDirectory(String value) throws InvalidPathException {
         if (value == null || value.isBlank()) {
             return null;
         }
-        try {
-            return Paths.get(value.trim());
-        } catch (InvalidPathException ex) {
-            return null;
-        }
+        return Paths.get(value.trim());
     }
 
     private double clampKeyboardHeightRatio(double ratio) {
