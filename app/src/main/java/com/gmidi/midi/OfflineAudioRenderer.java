@@ -1,5 +1,7 @@
 package com.gmidi.midi;
 
+import com.sun.media.sound.SoftSynthesizer;
+
 import javax.sound.midi.InvalidMidiDataException;
 import javax.sound.midi.MetaMessage;
 import javax.sound.midi.MidiChannel;
@@ -11,6 +13,7 @@ import javax.sound.midi.Sequence;
 import javax.sound.midi.Sequencer;
 import javax.sound.midi.ShortMessage;
 import javax.sound.midi.Soundbank;
+import javax.sound.midi.Transmitter;
 import javax.sound.sampled.AudioFileFormat;
 import javax.sound.sampled.AudioFormat;
 import javax.sound.sampled.AudioInputStream;
@@ -19,11 +22,9 @@ import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.lang.reflect.Constructor;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
+import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.LongConsumer;
 
@@ -68,14 +69,14 @@ public final class OfflineAudioRenderer {
         return prepared;
     }
 
-    public static void renderWav(Sequence sequence,
+    public static Path renderWav(Sequence sequence,
                                  MidiService.MidiProgram program,
                                  MidiService.ReverbPreset reverbPreset,
                                  int transposeSemis,
                                  VelocityMap velocityMap,
                                  Soundbank customSoundbank,
                                  File outputFile) throws Exception {
-        renderWav(sequence,
+        return renderWav(sequence,
                 program,
                 transposeSemis,
                 velocityMap,
@@ -86,7 +87,7 @@ public final class OfflineAudioRenderer {
                 null);
     }
 
-    public static void renderWav(Sequence sequence,
+    public static Path renderWav(Sequence sequence,
                                  MidiService.MidiProgram program,
                                  int transposeSemis,
                                  VelocityMap velocityMap,
@@ -109,20 +110,27 @@ public final class OfflineAudioRenderer {
             parent.mkdirs();
         }
         Sequence playable = prepareSequence(sequence, program, reverbPreset, transposeSemis);
-        AudioSynth synth = AudioSynth.create();
         AudioFormat format = new AudioFormat(44_100f, 16, 2, true, false);
-        try (AudioSynth ignored = synth;
-             AudioInputStream stream = synth.openStream(format);
+        SoftSynthesizer synth = new SoftSynthesizer();
+        AudioInputStream stream = synth.openStream(format, null);
+        try (AudioInputStream ignored = stream;
              BufferedOutputStream out = new BufferedOutputStream(new FileOutputStream(outputFile))) {
             if (customSoundbank != null) {
-                synth.loadSoundbank(customSoundbank);
+                Soundbank defaultBank = synth.getDefaultSoundbank();
+                if (defaultBank != null) {
+                    synth.unloadAllInstruments(defaultBank);
+                }
+                synth.loadAllInstruments(customSoundbank);
             }
             applyReverb(synth.getChannels(), reverbPreset);
             Sequencer sequencer = MidiSystem.getSequencer(false);
             sequencer.open();
             try {
-                try (TransmitterLink link = new TransmitterLink(sequencer.getTransmitter(),
-                        new VelocityReceiver(synth.getReceiver(), velocityMap))) {
+                Transmitter transmitter = sequencer.getTransmitter();
+                Receiver synthReceiver = synth.getReceiver();
+                Receiver velocityReceiver = new VelocityReceiver(synthReceiver, velocityMap);
+                transmitter.setReceiver(velocityReceiver);
+                try {
                     sequencer.setSequence(playable);
                     sequencer.setTickPosition(0);
                     AtomicBoolean running = new AtomicBoolean(true);
@@ -167,11 +175,17 @@ public final class OfflineAudioRenderer {
                     if (cancelFlag != null && cancelFlag.get()) {
                         throw new InterruptedException("Audio render cancelled");
                     }
+                } finally {
+                    velocityReceiver.close();
+                    transmitter.close();
                 }
             } finally {
                 sequencer.close();
             }
+        } finally {
+            synth.close();
         }
+        return outputFile.toPath();
     }
 
     private static MidiMessage cloneWithTranspose(MidiMessage message, int semis) {
@@ -265,85 +279,5 @@ public final class OfflineAudioRenderer {
         }
     }
 
-    private static final class TransmitterLink implements AutoCloseable {
-        private final javax.sound.midi.Transmitter transmitter;
-        private final Receiver receiver;
 
-        private TransmitterLink(javax.sound.midi.Transmitter transmitter, Receiver receiver) {
-            this.transmitter = transmitter;
-            this.receiver = receiver;
-            this.transmitter.setReceiver(receiver);
-        }
-
-        @Override
-        public void close() {
-            transmitter.close();
-            receiver.close();
-        }
-    }
-
-    private interface AudioSynth extends AutoCloseable {
-        AudioInputStream openStream(AudioFormat format) throws Exception;
-
-        Receiver getReceiver() throws Exception;
-
-        MidiChannel[] getChannels();
-
-        void loadSoundbank(Soundbank bank) throws Exception;
-
-        @Override
-        void close() throws Exception;
-
-        static AudioSynth create() throws Exception {
-            Class<?> clazz = Class.forName("com.sun.media.sound.SoftSynthesizer");
-            Constructor<?> ctor = clazz.getDeclaredConstructor();
-            ctor.setAccessible(true);
-            Object instance = ctor.newInstance();
-            return new ReflectionAudioSynth(instance);
-        }
-    }
-
-    private static final class ReflectionAudioSynth implements AudioSynth {
-        private final Object synth;
-        private final javax.sound.midi.Synthesizer asSynth;
-        private final Map<String, Object> openParams = new HashMap<>();
-
-        private ReflectionAudioSynth(Object synth) {
-            this.synth = synth;
-            this.asSynth = (javax.sound.midi.Synthesizer) synth;
-        }
-
-        @Override
-        public AudioInputStream openStream(AudioFormat format) throws Exception {
-            return (AudioInputStream) synth.getClass()
-                    .getMethod("openStream", AudioFormat.class, Map.class)
-                    .invoke(synth, format, openParams);
-        }
-
-        @Override
-        public Receiver getReceiver() throws Exception {
-            return asSynth.getReceiver();
-        }
-
-        @Override
-        public MidiChannel[] getChannels() {
-            return asSynth.getChannels();
-        }
-
-        @Override
-        public void loadSoundbank(Soundbank bank) throws Exception {
-            if (bank != null) {
-                Soundbank defaultBank = asSynth.getDefaultSoundbank();
-                if (defaultBank != null) {
-                    asSynth.unloadAllInstruments(defaultBank);
-                }
-                asSynth.loadAllInstruments(bank);
-            }
-        }
-
-        @Override
-        public void close() throws Exception {
-            asSynth.close();
-        }
-    }
 }

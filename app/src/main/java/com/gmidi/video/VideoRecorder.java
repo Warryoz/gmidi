@@ -356,32 +356,44 @@ public class VideoRecorder {
                 videoFile.toAbsolutePath().toString(),
                 "-i",
                 audioFile.toAbsolutePath().toString(),
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
                 "-c:v",
-                "copy",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
                 "-c:a",
                 "aac",
                 "-shortest",
                 outputFile.toAbsolutePath().toString()
         );
         ProcessBuilder builder = new ProcessBuilder(command);
-        builder.redirectErrorStream(true);
+        builder.redirectErrorStream(false);
         Process process = null;
         try {
             process = builder.start();
-            StringBuilder output = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+            StringBuilder stderr = new StringBuilder();
+            try (BufferedReader err = new BufferedReader(new InputStreamReader(process.getErrorStream()));
+                 BufferedReader out = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
                 String line;
-                while ((line = reader.readLine()) != null) {
-                    output.append(line).append('\n');
+                while ((line = err.readLine()) != null) {
+                    stderr.append(line).append('\n');
+                }
+                while (out.readLine() != null) {
+                    // drain stdout
                 }
             }
             int exit = process.waitFor();
             if (exit != 0) {
-                throw new IOException("ffmpeg mux failed with code " + exit + "\n" + output);
+                throw new IOException("ffmpeg mux failed with code " + exit + "\n" + stderr);
             }
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
             throw new IOException("ffmpeg mux interrupted", ex);
+        } catch (IOException ex) {
+            throw friendly(ex);
         } finally {
             if (process != null && process.isAlive()) {
                 process.destroyForcibly();
