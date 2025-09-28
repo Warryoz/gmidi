@@ -31,6 +31,18 @@ public class KeyFallCanvas extends Canvas {
     private static final Color BACKGROUND = Color.web("#101010");
     private static final double MAX_DIMENSION = 8192.0;
     private static final Color NOTE_COLOR = Color.web("#2CE4D0");
+    private static final int MIN_W = 640;
+    private static final int MIN_H = 360;
+
+    private static int even(int value) {
+        return value & ~1;
+    }
+
+    private static int normalizeToEvenPx(double value, int min) {
+        double clamped = Math.max(1.0, Math.min(MAX_DIMENSION, value));
+        int px = (int) Math.max(min, Math.round(clamped));
+        return even(px);
+    }
 
     private final List<NoteSprite> sprites = new ArrayList<>();
     private final Deque<NoteSprite> pool = new ArrayDeque<>();
@@ -43,6 +55,7 @@ public class KeyFallCanvas extends Canvas {
     private boolean sustainPedal;
     private double windowSeconds = DEFAULT_WINDOW_SECONDS;
     private long lastTickNanos;
+    private boolean renderRequested = true;
 
     public KeyFallCanvas() {
         super(1, 1);
@@ -82,24 +95,19 @@ public class KeyFallCanvas extends Canvas {
         if (boundViewport == null) {
             return;
         }
-        // Only observe layoutBoundsProperty to avoid resize feedback loops between the canvas
-        // and its parent region. Clamp to a minimum size so the renderer always has a surface.
         Bounds bounds = boundViewport.getLayoutBounds();
         if (bounds == null) {
             return;
         }
-        double width = clampDimension(bounds.getWidth());
-        double height = clampDimension(bounds.getHeight());
-        setWidth(width);
-        setHeight(height);
-        drawLastFrame();
-    }
-
-    private double clampDimension(double value) {
-        if (!Double.isFinite(value)) {
-            return 1.0;
+        int newWidth = normalizeToEvenPx(bounds.getWidth(), MIN_W);
+        int newHeight = normalizeToEvenPx(bounds.getHeight(), MIN_H);
+        boolean changed = newWidth != (int) getWidth() || newHeight != (int) getHeight();
+        if (!changed) {
+            return;
         }
-        return Math.max(1.0, Math.min(MAX_DIMENSION, value));
+        setWidth(newWidth);
+        setHeight(newHeight);
+        requestRender();
     }
 
     /**
@@ -112,7 +120,7 @@ public class KeyFallCanvas extends Canvas {
         }
         if (this.windowSeconds != seconds) {
             this.windowSeconds = seconds;
-            drawLastFrame();
+            requestRender();
         }
     }
 
@@ -137,6 +145,7 @@ public class KeyFallCanvas extends Canvas {
         sprite.reset(note, velocity, timestampNanos);
         sprites.add(sprite);
         activePerNote[note].addLast(sprite);
+        requestRender();
     }
 
     /**
@@ -156,6 +165,7 @@ public class KeyFallCanvas extends Canvas {
         if (!sustainPedal) {
             stack.removeLast();
         }
+        requestRender();
     }
 
     /**
@@ -176,6 +186,7 @@ public class KeyFallCanvas extends Canvas {
                 }
             }
         }
+        requestRender();
     }
 
     /**
@@ -190,7 +201,7 @@ public class KeyFallCanvas extends Canvas {
         for (Deque<NoteSprite> stack : activePerNote) {
             stack.clear();
         }
-        drawLastFrame();
+        requestRender();
     }
 
     /**
@@ -202,14 +213,11 @@ public class KeyFallCanvas extends Canvas {
             nowNanos = System.nanoTime();
         }
         lastTickNanos = nowNanos;
-        draw(nowNanos);
-    }
-
-    private void drawLastFrame() {
-        if (lastTickNanos == 0) {
-            lastTickNanos = System.nanoTime();
+        if (!renderRequested && sprites.isEmpty()) {
+            return;
         }
-        draw(lastTickNanos);
+        renderRequested = false;
+        draw(nowNanos);
     }
 
     private void draw(long nowNanos) {
@@ -294,6 +302,10 @@ public class KeyFallCanvas extends Canvas {
         activePerNote[sprite.note].remove(sprite);
         sprite.reset(0, 0, 0);
         pool.addLast(sprite);
+    }
+
+    private void requestRender() {
+        renderRequested = true;
     }
 
     private static final class NoteSprite {

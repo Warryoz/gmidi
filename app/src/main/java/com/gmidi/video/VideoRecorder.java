@@ -6,16 +6,17 @@ import javafx.scene.image.WritableImage;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.file.Files;
-import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
@@ -44,6 +45,7 @@ public class VideoRecorder {
     private Thread stderrDrainer;
     private final StringBuilder stderrBuffer = new StringBuilder();
     private String ffmpegExecutablePath;
+    private List<String> ffmpegCommand = Collections.emptyList();
 
     public void start(Path outputFile, VideoSettings settings) throws IOException {
         Objects.requireNonNull(outputFile, "outputFile");
@@ -57,20 +59,32 @@ public class VideoRecorder {
             Files.createDirectories(parent);
         }
 
-        ffmpegExecutablePath = resolveFfmpegExecutable(settings);
+        ffmpegExecutablePath = FfmpegLocator.resolve(settings);
 
-        ProcessBuilder builder = new ProcessBuilder(
-                ffmpegExecutablePath,
-                "-y",
-                "-f", "image2pipe",
-                "-r", Integer.toString(settings.getFps()),
-                "-i", "-",
-                "-c:v", "libx264",
-                "-pix_fmt", "yuv420p",
-                "-preset", settings.getPreset(),
-                "-crf", Integer.toString(settings.getCrf()),
-                outputFile.toAbsolutePath().toString()
-        );
+        List<String> command = new ArrayList<>();
+        command.add(ffmpegExecutablePath);
+        command.add("-y");
+        command.add("-f");
+        command.add("image2pipe");
+        command.add("-vcodec");
+        command.add("png");
+        command.add("-r");
+        command.add(Integer.toString(settings.getFps()));
+        command.add("-i");
+        command.add("-");
+        command.add("-vf");
+        command.add("scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p");
+        command.add("-c:v");
+        command.add("libx264");
+        command.add("-preset");
+        command.add(settings.getPreset());
+        command.add("-crf");
+        command.add(Integer.toString(settings.getCrf()));
+        command.add("-movflags");
+        command.add("+faststart");
+        command.add(outputFile.toAbsolutePath().toString());
+
+        ProcessBuilder builder = new ProcessBuilder(command);
         builder.redirectErrorStream(false);
         try {
             ffmpegProcess = builder.start();
@@ -79,6 +93,9 @@ public class VideoRecorder {
             throw new IOException("Unable to start ffmpeg at " + builder.command().get(0) + ": " + ex.getMessage(), ex);
         }
 
+        ffmpegCommand = List.copyOf(builder.command());
+        logCommand();
+
         ffmpegInput = ffmpegProcess.getOutputStream();
         ThreadFactory factory = runnable -> {
             Thread t = new Thread(runnable, "gmidi-ffmpeg-writer");
@@ -86,14 +103,24 @@ public class VideoRecorder {
             return t;
         };
         int queueCapacity = Math.max(4, settings.getFps() / 2);
+        BlockingQueue<Runnable> queue = new LinkedBlockingQueue<>(queueCapacity);
         encoderExecutor = new ThreadPoolExecutor(
                 1,
                 1,
                 0L,
                 TimeUnit.MILLISECONDS,
-                new LinkedBlockingQueue<>(queueCapacity),
+                queue,
                 factory,
-                new ThreadPoolExecutor.AbortPolicy()
+                (runnable, executor) -> {
+                    if (executor.isShutdown()) {
+                        throw new RejectedExecutionException("Encoder shutdown");
+                    }
+                    Runnable dropped = executor.getQueue().poll();
+                    if (dropped != null) {
+                        framesDropped.incrementAndGet();
+                    }
+                    executor.execute(runnable);
+                }
         );
         running.set(true);
         framesWritten.set(0);
@@ -194,71 +221,51 @@ public class VideoRecorder {
             synchronized (stderrBuffer) {
                 stderr = stderrBuffer.toString();
             }
-            throw new IOException("ffmpeg exited with code " + exit + "\n" + stderr);
+            throw new IOException("ffmpeg exited with code " + exit + "\n" + summarise(stderr));
         }
         encoderExecutor = null;
         ffmpegProcess = null;
         ffmpegInput = null;
         ffmpegExecutablePath = null;
+        ffmpegCommand = Collections.emptyList();
     }
 
-    private String resolveFfmpegExecutable(VideoSettings settings) throws IOException {
-        Path configured = settings.getFfmpegExecutable();
-        if (configured != null) {
-            Path normalized = configured.toAbsolutePath().normalize();
-            if (!Files.exists(normalized)) {
-                throw new IOException("Configured FFmpeg path does not exist: " + normalized);
-            }
-            if (!Files.isRegularFile(normalized)) {
-                throw new IOException("Configured FFmpeg path is not a file: " + normalized);
-            }
-            if (!Files.isExecutable(normalized)) {
-                throw new IOException("Configured FFmpeg path is not executable: " + normalized);
-            }
-            return normalized.toString();
+    private void logCommand() {
+        if (ffmpegCommand.isEmpty()) {
+            return;
         }
-
-        String located = locateOnPath();
-        if (located != null) {
-            return located;
-        }
-
-        logInstallHints();
-        throw new IOException("FFmpeg not found. Install it or set its path in Settings.");
-    }
-
-    private String locateOnPath() {
-        String path = System.getenv("PATH");
-        if (path == null || path.isBlank()) {
-            return null;
-        }
-        String executable = isWindows() ? "ffmpeg.exe" : "ffmpeg";
-        String[] entries = path.split(File.pathSeparator);
-        for (String entry : entries) {
-            if (entry == null || entry.isBlank()) {
-                continue;
-            }
+        System.out.println("[VideoRecorder] Using FFmpeg executable: " + ffmpegExecutablePath);
+        List<String> sanitised = new ArrayList<>(ffmpegCommand);
+        if (!sanitised.isEmpty()) {
+            int last = sanitised.size() - 1;
             try {
-                Path candidate = Paths.get(entry.trim()).resolve(executable);
-                if (Files.isRegularFile(candidate) && Files.isExecutable(candidate)) {
-                    return candidate.toAbsolutePath().toString();
-                }
-            } catch (InvalidPathException ignored) {
+                Path output = Path.of(sanitised.get(last));
+                sanitised.set(last, output.getFileName().toString());
+            } catch (Exception ignored) {
             }
         }
-        return null;
+        System.out.println("[VideoRecorder] Command: " + String.join(" ", sanitised));
     }
 
-    private boolean isWindows() {
-        String os = System.getProperty("os.name");
-        return os != null && os.toLowerCase().contains("win");
-    }
-
-    private void logInstallHints() {
-        String hints = "FFmpeg not found. Install it or set its path in Settings.\n" +
-                "Windows: winget install Gyan.FFmpeg (or choco install ffmpeg)\n" +
-                "macOS: brew install ffmpeg\n" +
-                "Ubuntu: sudo apt install ffmpeg";
-        System.err.println(hints);
+    private String summarise(String stderr) {
+        if (stderr == null || stderr.isBlank()) {
+            return "(no stderr output)";
+        }
+        String[] lines = stderr.split("\\R");
+        if (lines.length <= 100) {
+            return stderr;
+        }
+        StringBuilder builder = new StringBuilder();
+        builder.append("--- ffmpeg stderr (first 50 lines) ---\n");
+        for (int i = 0; i < Math.min(50, lines.length); i++) {
+            builder.append(lines[i]).append('\n');
+        }
+        builder.append("--- snip ---\n");
+        builder.append("--- ffmpeg stderr (last 50 lines) ---\n");
+        int start = Math.max(50, lines.length - 50);
+        for (int i = start; i < lines.length; i++) {
+            builder.append(lines[i]).append('\n');
+        }
+        return builder.toString();
     }
 }
