@@ -18,6 +18,7 @@ import javafx.scene.control.Label;
 import javafx.scene.control.Spinner;
 import javafx.scene.control.SpinnerValueFactory;
 import javafx.scene.control.TextField;
+import javafx.scene.Scene;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.Priority;
 import javafx.stage.DirectoryChooser;
@@ -45,6 +46,9 @@ import java.util.concurrent.atomic.AtomicLong;
 public class SettingsDialog extends Dialog<SettingsDialog.Result> {
 
     private final AtomicLong ffmpegProbeCounter = new AtomicLong();
+    private static final String DARK_THEME = Objects.requireNonNull(
+            SettingsDialog.class.getResource("/DarkTheme.css"))
+            .toExternalForm();
 
     public SettingsDialog(VideoSettings current,
                          String currentSoundFont,
@@ -59,6 +63,14 @@ public class SettingsDialog extends Dialog<SettingsDialog.Result> {
         getDialogPane().getStyleClass().add("settings-dialog");
         if (owner != null && owner.getScene() != null) {
             initOwner(owner.getScene().getWindow());
+        }
+        getDialogPane().sceneProperty().addListener((obs, oldScene, newScene) -> {
+            if (newScene != null) {
+                applyDarkTheme(newScene);
+            }
+        });
+        if (getDialogPane().getScene() != null) {
+            applyDarkTheme(getDialogPane().getScene());
         }
 
         GridPane grid = new GridPane();
@@ -235,6 +247,12 @@ public class SettingsDialog extends Dialog<SettingsDialog.Result> {
                     reverbChoice.getValue() == null ? MidiService.ReverbPreset.ROOM : reverbChoice.getValue();
             return new Result(updated, resolvedSoundFont, chosenInstrument, chosenCurve, transpose, chosenPreset);
         });
+    }
+
+    private void applyDarkTheme(Scene scene) {
+        if (scene != null && !scene.getStylesheets().contains(DARK_THEME)) {
+            scene.getStylesheets().add(DARK_THEME);
+        }
     }
 
     public static final class Result {

@@ -52,6 +52,8 @@ public class KeyboardView extends Region {
         setMinHeight(MIN_HEIGHT);
         setPrefHeight(clampHeight(800 * DEFAULT_HEIGHT_RATIO));
         setMaxHeight(MAX_HEIGHT);
+        widthProperty().addListener((obs, oldV, newV) -> redraw());
+        heightProperty().addListener((obs, oldV, newV) -> redraw());
         canvas.addEventHandler(MouseEvent.MOUSE_MOVED, e -> handleHover(e, true));
         canvas.addEventHandler(MouseEvent.MOUSE_EXITED, e -> handleHover(e, false));
     }

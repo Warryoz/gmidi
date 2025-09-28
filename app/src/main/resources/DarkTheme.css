@@ -1,0 +1,49 @@
+/* Base */
+.root {
+  -fx-background-color: #0f1116;
+  -fx-text-fill: white;
+  -fx-text-base-color: white;
+  -fx-control-inner-background: #161a23;
+  -fx-accent: #2f6df6;
+}
+
+.label, .button, .toggle-button, .check-box, .radio-button, .tab-label, .menu-button, .menu-button .label {
+  -fx-text-fill: white;
+}
+
+/* Text inputs */
+.text-field, .password-field, .spinner .text-field {
+  -fx-text-fill: white;
+  -fx-prompt-text-fill: rgba(255,255,255,0.55);
+  -fx-background-color: #161a23, #161a23;
+  -fx-highlight-fill: #2f6df6;
+  -fx-highlight-text-fill: white;
+}
+
+/* ComboBox / ChoiceBox */
+.combo-box, .choice-box {
+  -fx-background-color: #161a23, #161a23;
+}
+
+.combo-box .list-cell, .choice-box .label {
+  -fx-text-fill: white;
+}
+
+.combo-box .arrow, .choice-box .arrow {
+  -fx-background-color: white;
+}
+
+/* Popup menus / lists */
+.list-view, .menu-button, .context-menu {
+  -fx-background-color: #161a23;
+}
+
+.list-cell, .menu-item > .label {
+  -fx-text-fill: white;
+}
+
+/* Disable focus ring glare */
+.focused {
+  -fx-faint-focus-color: rgba(47,109,246,0.15);
+  -fx-focus-color: #2f6df6;
+}
