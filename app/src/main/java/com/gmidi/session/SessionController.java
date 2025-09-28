@@ -19,6 +19,10 @@ import com.gmidi.video.VideoSettings;
 import javafx.animation.AnimationTimer;
 import javafx.application.Platform;
 import javafx.beans.binding.Bindings;
+import javafx.collections.FXCollections;
+import javafx.concurrent.Task;
+import javafx.geometry.Insets;
+import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.SnapshotParameters;
@@ -26,24 +30,35 @@ import javafx.scene.control.Button;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressBar;
+import javafx.scene.control.RadioButton;
 import javafx.scene.control.Slider;
+import javafx.scene.control.TextField;
 import javafx.scene.control.ToggleButton;
+import javafx.scene.control.ToggleGroup;
 import javafx.scene.image.WritableImage;
 import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.GridPane;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
+import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
 import javafx.scene.shape.Rectangle;
 import javafx.scene.transform.Transform;
 import javafx.stage.FileChooser;
+import javafx.stage.Modality;
+import javafx.stage.Stage;
 import javafx.stage.Window;
 
 import javax.sound.midi.InvalidMidiDataException;
 import javax.sound.midi.MetaMessage;
 import javax.sound.midi.MidiEvent;
 import javax.sound.midi.MidiMessage;
+import javax.sound.midi.MidiSystem;
 import javax.sound.midi.MidiUnavailableException;
 import javax.sound.midi.Sequence;
+import javax.sound.midi.Sequencer;
 import javax.sound.midi.ShortMessage;
 import javax.sound.midi.Synthesizer;
 import java.io.File;
@@ -59,6 +74,7 @@ import java.util.Objects;
 import java.util.Comparator;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -837,7 +853,6 @@ public class SessionController {
             }
         }
         Path outputDir = Optional.ofNullable(videoSettings.getOutputDirectory()).orElse(Paths.get("recordings"));
-        Prefs.putLastExportDir(outputDir.toString());
         String baseName;
         if (capturingLive && currentMidiFile != null) {
             baseName = stripExtension(currentMidiFile.getFileName().toString());
@@ -857,7 +872,7 @@ public class SessionController {
                 videoRecordToggle.setSelected(false);
                 return;
             }
-            exportReplaySequence(sequence, outputDir, baseName, finalVideo);
+            exportReplaySequence(sequence, baseName, outputDir);
             return;
         }
 
@@ -892,132 +907,559 @@ public class SessionController {
         }
     }
 
-    private void exportReplaySequence(Sequence sequence,
-                                      Path outputDir,
-                                      String baseName,
-                                      Path finalVideo) {
-        try {
-            Files.createDirectories(outputDir);
-        } catch (IOException ex) {
-            statusLabel.setText("Unable to create output folder: " + ex.getMessage());
-            videoRecordToggle.setSelected(false);
-            videoRecordToggle.setDisable(false);
+    private void exportReplaySequence(Sequence sequence, String baseName, Path defaultDir) {
+        if (sequence == null) {
+            statusLabel.setText("No MIDI sequence ready for export");
             return;
         }
-
-        Prefs.putLastExportDir(outputDir.toString());
-
-        Path audioTemp = outputDir.resolve(baseName + "-audio.wav");
-        Path videoTemp = outputDir.resolve(baseName + "-video.mp4");
-        currentVideoFile = finalVideo;
-        currentVideoTempFile = videoTemp;
-        currentAudioFile = audioTemp;
         videoRecordToggle.setDisable(true);
-        statusLabel.setText("Exporting video → " + finalVideo.getFileName());
-
-        double captureWidth = Math.max(1.0, captureNode.getLayoutBounds().getWidth());
-        double captureHeight = Math.max(1.0, captureNode.getLayoutBounds().getHeight());
-        int fps = Math.max(1, videoSettings.getFps());
-        double scale = Math.min(1.0,
-                Math.min(videoSettings.getWidth() / captureWidth,
-                        videoSettings.getHeight() / captureHeight));
-        if (scale <= 0.0) {
-            scale = 1.0;
+        Window owner = resolveWindow();
+        Stage dialog = new Stage();
+        if (owner != null) {
+            dialog.initOwner(owner);
         }
-        int frameWidth = Math.max(1, (int) Math.round(captureWidth * scale));
-        int frameHeight = Math.max(1, (int) Math.round(captureHeight * scale));
-        long tailMicros = (long) Math.round(Math.max(0.0, keyFallCanvas.getFallDurationSeconds()) * 1_000_000.0);
+        dialog.initModality(Modality.APPLICATION_MODAL);
+        dialog.setTitle("Export Video");
+        dialog.setResizable(false);
 
-        final Sequence exportSequence = sequence;
-        final Path audioTempPath = audioTemp;
-        final Path videoTempPath = videoTemp;
-        final Path finalVideoPath = finalVideo;
-        final int exportFps = fps;
-        final int exportFrameWidth = frameWidth;
-        final int exportFrameHeight = frameHeight;
-        final double exportScale = scale;
-        final long exportTailMicros = tailMicros;
+        ComboBox<Integer> fpsBox = new ComboBox<>(FXCollections.observableArrayList(30, 60));
+        fpsBox.getSelectionModel().select(Integer.valueOf(60));
 
-        Thread worker = new Thread(() -> {
-            try {
-                Sequence prepared = OfflineAudioRenderer.prepareSequence(
-                        exportSequence,
-                        midiService.getCurrentProgram(),
-                        midiService.getReverbPreset(),
-                        midiService.getTranspose());
-                OfflineAudioRenderer.renderWav(
-                        exportSequence,
-                        midiService.getCurrentProgram(),
-                        midiService.getReverbPreset(),
-                        midiService.getTranspose(),
-                        midiService.getVelocityMap(),
-                        midiService.getCustomSoundbankOrNull(),
-                        audioTempPath.toFile());
-                List<TimedNoteEvent> events = buildTimedNoteEvents(prepared, midiService.getVelocityMap());
-                renderFramesToVideo(events, videoTempPath, exportFps, exportFrameWidth, exportFrameHeight, exportScale, exportTailMicros);
-                new VideoRecorder().muxWithAudio(videoTempPath, audioTempPath, finalVideoPath, videoSettings);
-                Platform.runLater(() -> {
-                    currentVideoFile = finalVideoPath;
-                    currentVideoTempFile = null;
-                    currentAudioFile = null;
-                    statusLabel.setText("Saved video " + finalVideoPath.getFileName());
-                });
-            } catch (InterruptedException ex) {
-                Thread.currentThread().interrupt();
-                Platform.runLater(() -> statusLabel.setText("Export interrupted"));
-            } catch (Exception ex) {
-                Platform.runLater(() -> statusLabel.setText("Export failed: " + ex.getMessage()));
-            } finally {
-                try {
-                    Files.deleteIfExists(audioTempPath);
-                } catch (IOException ignored) {
+        ComboBox<String> resolutionBox = new ComboBox<>(FXCollections.observableArrayList("Current window", "1280×720", "1920×1080"));
+        resolutionBox.getSelectionModel().selectFirst();
+
+        ToggleGroup rangeGroup = new ToggleGroup();
+        RadioButton entireButton = new RadioButton("Entire piece");
+        entireButton.setToggleGroup(rangeGroup);
+        entireButton.setSelected(true);
+        RadioButton rangeButton = new RadioButton("Range (mm:ss)");
+        rangeButton.setToggleGroup(rangeGroup);
+
+        TextField fromField = new TextField(formatMicrosAsTime(0));
+        TextField toField = new TextField(formatMicrosAsTime(sequence.getMicrosecondLength()));
+        fromField.setDisable(true);
+        toField.setDisable(true);
+        rangeGroup.selectedToggleProperty().addListener((obs, oldToggle, newToggle) -> {
+            boolean range = newToggle == rangeButton;
+            fromField.setDisable(!range);
+            toField.setDisable(!range);
+        });
+
+        TextField outputField = new TextField();
+        outputField.setPrefColumnCount(28);
+        Button browseButton = new Button("Browse…");
+
+        Path lastDir = null;
+        try {
+            lastDir = resolveDirectory(Prefs.getLastExportDir());
+        } catch (Exception ignored) {
+        }
+        Path initialDir = lastDir != null ? lastDir : defaultDir;
+        if (initialDir == null) {
+            initialDir = Paths.get(System.getProperty("user.home", "."));
+        }
+        Path suggestedFile = initialDir.resolve(baseName + ".mp4");
+        outputField.setText(suggestedFile.toString());
+
+        FileChooser chooser = new FileChooser();
+        chooser.setTitle("Export Video");
+        chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("MP4 Video", "*.mp4"));
+        Path finalInitialDir = initialDir;
+        browseButton.setOnAction(e -> {
+            if (!outputField.getText().isBlank()) {
+                File candidate = new File(outputField.getText());
+                if (candidate.getParentFile() != null && candidate.getParentFile().isDirectory()) {
+                    chooser.setInitialDirectory(candidate.getParentFile());
+                    chooser.setInitialFileName(candidate.getName());
                 }
-                try {
-                    Files.deleteIfExists(videoTempPath);
-                } catch (IOException ignored) {
-                }
-                Platform.runLater(() -> {
-                    videoRecordToggle.setDisable(false);
-                    videoRecordToggle.setSelected(false);
-                    currentAudioFile = null;
-                    currentVideoTempFile = null;
-                });
+            } else if (finalInitialDir != null && Files.isDirectory(finalInitialDir)) {
+                chooser.setInitialDirectory(finalInitialDir.toFile());
+                chooser.setInitialFileName(baseName + ".mp4");
             }
-        }, "gmidi-export");
-        worker.setDaemon(true);
-        worker.start();
+            File selected = chooser.showSaveDialog(dialog);
+            if (selected != null) {
+                outputField.setText(selected.getAbsolutePath());
+            }
+        });
+
+        GridPane form = new GridPane();
+        form.setHgap(10);
+        form.setVgap(8);
+        form.add(new Label("FPS"), 0, 0);
+        form.add(fpsBox, 1, 0);
+        form.add(new Label("Resolution"), 0, 1);
+        form.add(resolutionBox, 1, 1);
+        form.add(entireButton, 0, 2, 2, 1);
+        HBox rangeFields = new HBox(6, rangeButton, new Label("From"), fromField, new Label("To"), toField);
+        form.add(rangeFields, 0, 3, 2, 1);
+        form.add(new Label("Output"), 0, 4);
+        HBox outputBox = new HBox(6, outputField, browseButton);
+        HBox.setHgrow(outputField, Priority.ALWAYS);
+        form.add(outputBox, 1, 4);
+
+        ProgressBar progressBar = new ProgressBar(0);
+        progressBar.setPrefWidth(360);
+        progressBar.setVisible(false);
+        Label progressLabel = new Label();
+        progressLabel.setVisible(false);
+
+        Button exportButton = new Button("Export");
+        Button cancelButton = new Button("Cancel");
+        HBox buttons = new HBox(10, exportButton, cancelButton);
+        buttons.setAlignment(Pos.CENTER_RIGHT);
+
+        VBox content = new VBox(12, form, progressLabel, progressBar, buttons);
+        content.setPadding(new Insets(16));
+        dialog.setScene(new Scene(content));
+
+        AtomicBoolean running = new AtomicBoolean(false);
+        AtomicBoolean cancelRequested = new AtomicBoolean(false);
+        List<Node> inputs = List.of(fpsBox, resolutionBox, entireButton, rangeButton, fromField, toField, outputField, browseButton);
+
+        cancelButton.setOnAction(e -> {
+            if (running.get()) {
+                cancelRequested.set(true);
+                cancelButton.setDisable(true);
+            } else {
+                dialog.close();
+            }
+        });
+
+        dialog.setOnCloseRequest(e -> {
+            if (running.get()) {
+                cancelRequested.set(true);
+                cancelButton.setDisable(true);
+                e.consume();
+            }
+        });
+
+        dialog.setOnHidden(e -> {
+            videoRecordToggle.setDisable(false);
+            videoRecordToggle.setSelected(false);
+        });
+
+        exportButton.setOnAction(e -> {
+            progressLabel.setVisible(false);
+            progressLabel.setText("");
+            progressBar.setVisible(false);
+            cancelRequested.set(false);
+
+            Integer fpsValue = fpsBox.getValue();
+            if (fpsValue == null) {
+                progressLabel.setText("Select an FPS.");
+                progressLabel.setVisible(true);
+                return;
+            }
+            int fps = fpsValue;
+
+            int width;
+            int height;
+            String resolution = resolutionBox.getValue();
+            if (resolution != null && resolution.contains("1280")) {
+                width = 1280;
+                height = 720;
+            } else if (resolution != null && resolution.contains("1920")) {
+                width = 1920;
+                height = 1080;
+            } else {
+                double captureWidth = captureNode.getLayoutBounds().getWidth();
+                double captureHeight = captureNode.getLayoutBounds().getHeight();
+                if (captureNode instanceof Region region) {
+                    if (captureWidth <= 0 || captureHeight <= 0) {
+                        region.applyCss();
+                        region.layout();
+                        captureWidth = region.getLayoutBounds().getWidth();
+                        captureHeight = region.getLayoutBounds().getHeight();
+                    }
+                }
+                width = Math.max(1, (int) Math.round(Math.max(1.0, captureWidth)));
+                height = Math.max(1, (int) Math.round(Math.max(1.0, captureHeight)));
+            }
+
+            long totalMicros = sequence.getMicrosecondLength();
+            long startMicros = 0L;
+            long endMicros = totalMicros;
+            if (rangeButton.isSelected()) {
+                try {
+                    startMicros = parseTimeToMicros(fromField.getText());
+                    endMicros = parseTimeToMicros(toField.getText());
+                } catch (IllegalArgumentException ex) {
+                    progressLabel.setText(ex.getMessage());
+                    progressLabel.setVisible(true);
+                    return;
+                }
+                if (endMicros <= startMicros) {
+                    progressLabel.setText("End time must be after start time.");
+                    progressLabel.setVisible(true);
+                    return;
+                }
+                startMicros = Math.max(0L, Math.min(startMicros, totalMicros));
+                endMicros = Math.max(startMicros, Math.min(endMicros, totalMicros));
+            }
+            if (endMicros <= startMicros) {
+                progressLabel.setText("Select a non-empty time range.");
+                progressLabel.setVisible(true);
+                return;
+            }
+
+            String outputText = outputField.getText().trim();
+            if (outputText.isEmpty()) {
+                progressLabel.setText("Choose an output file.");
+                progressLabel.setVisible(true);
+                return;
+            }
+            Path outputPath;
+            try {
+                outputPath = Paths.get(outputText);
+            } catch (InvalidPathException ex) {
+                progressLabel.setText("Invalid output path.");
+                progressLabel.setVisible(true);
+                return;
+            }
+            Path parent = outputPath.getParent();
+            if (parent == null) {
+                progressLabel.setText("Output file must include a directory.");
+                progressLabel.setVisible(true);
+                return;
+            }
+
+            ExportOptions options = new ExportOptions(fps, width, height, startMicros, endMicros, outputPath);
+
+            progressBar.setProgress(0);
+            progressBar.setVisible(true);
+            progressLabel.setVisible(true);
+            progressLabel.setText("Rendering audio…");
+            inputs.forEach(node -> node.setDisable(true));
+            exportButton.setDisable(true);
+            cancelButton.setDisable(false);
+            running.set(true);
+            statusLabel.setText("Exporting video → " + outputPath.getFileName());
+
+            Task<Void> task = exportMidiToVideo(sequence, options, cancelRequested);
+            progressBar.progressProperty().bind(task.progressProperty());
+            progressLabel.textProperty().bind(task.messageProperty());
+
+            task.setOnSucceeded(ev -> {
+                running.set(false);
+                progressBar.progressProperty().unbind();
+                progressLabel.textProperty().unbind();
+                progressBar.setProgress(1.0);
+                progressLabel.setText("Done");
+                cancelButton.setDisable(false);
+                Path parentDir = options.output().toAbsolutePath().getParent();
+                if (parentDir != null) {
+                    Prefs.putLastExportDir(parentDir.toString());
+                }
+                statusLabel.setText("Saved video " + options.output().getFileName());
+                dialog.close();
+            });
+
+            task.setOnFailed(ev -> {
+                running.set(false);
+                cancelRequested.set(false);
+                progressBar.progressProperty().unbind();
+                progressLabel.textProperty().unbind();
+                progressBar.setProgress(0);
+                Throwable ex = task.getException();
+                String message = ex != null && ex.getMessage() != null ? ex.getMessage() : "Export failed";
+                progressLabel.setText("Export failed: " + message);
+                progressLabel.setVisible(true);
+                cancelButton.setDisable(false);
+                inputs.forEach(node -> node.setDisable(false));
+                exportButton.setDisable(false);
+                statusLabel.setText("Export failed: " + message);
+            });
+
+            task.setOnCancelled(ev -> {
+                running.set(false);
+                progressBar.progressProperty().unbind();
+                progressLabel.textProperty().unbind();
+                progressLabel.setText("Export cancelled");
+                progressLabel.setVisible(true);
+                cancelButton.setDisable(false);
+                statusLabel.setText("Export cancelled");
+                dialog.close();
+            });
+
+            Thread worker = new Thread(task, "gmidi-export");
+            worker.setDaemon(true);
+            worker.start();
+        });
+
+        dialog.show();
     }
 
-    private void renderFramesToVideo(List<TimedNoteEvent> events,
-                                     Path videoFile,
-                                     int fps,
-                                     int frameWidth,
-                                     int frameHeight,
-                                     double scale,
-                                     long tailMicros) throws IOException, InterruptedException {
-        VideoRecorder recorder = new VideoRecorder();
-        recorder.beginFramePush(videoFile, videoSettings);
-        try {
-            FrameRenderer renderer = new FrameRenderer(events);
-            runOnFxAndWait(renderer::reset);
-            long stepMicros = Math.max(1L, Math.round(1_000_000.0 / Math.max(1, fps)));
-            long lastMicros = events.isEmpty() ? 0L : events.get(events.size() - 1).micros();
-            long totalMicros = lastMicros + Math.max(0L, tailMicros);
-            for (long micros = 0; micros <= totalMicros; micros += stepMicros) {
-                WritableImage frame = captureFrameAtMicros(renderer, micros, frameWidth, frameHeight, scale);
-                recorder.pushFrame(frame);
+    private Task<Void> exportMidiToVideo(Sequence sequence, ExportOptions options, AtomicBoolean cancelFlag) {
+        return new Task<>() {
+            @Override
+            protected Void call() throws Exception {
+                updateProgress(0.0, 1.0);
+                updateMessage("Rendering audio…");
+                Path tempDir = Files.createTempDirectory("gmidi-export");
+                Path audioFile = tempDir.resolve("audio.wav");
+                Path videoFile = tempDir.resolve("video.mp4");
+                try {
+                    Sequence clipped = clipSequence(sequence, options.startMicros(), options.endMicros());
+                    try {
+                        OfflineAudioRenderer.renderWav(
+                                clipped,
+                                midiService.getCurrentProgram(),
+                                midiService.getTranspose(),
+                                midiService.getVelocityMap(),
+                                midiService.getReverbPreset(),
+                                midiService.getCustomSoundbankOrNull(),
+                                audioFile.toFile(),
+                                micros -> {
+                                    long span = Math.max(1L, options.endMicros() - options.startMicros());
+                                    double portion = Math.min(1.0, Math.max(0.0, (double) micros / span));
+                                    updateProgress(portion * 0.5, 1.0);
+                                },
+                                cancelFlag);
+                    } catch (InterruptedException ex) {
+                        if (cancelFlag.get()) {
+                            updateMessage("Cancelling…");
+                            cancel();
+                            return null;
+                        }
+                        throw ex;
+                    }
+                    if (cancelFlag.get()) {
+                        updateMessage("Cancelling…");
+                        cancel();
+                        return null;
+                    }
+
+                    updateProgress(0.5, 1.0);
+                    updateMessage("Rendering video…");
+
+                    Sequence prepared = OfflineAudioRenderer.prepareSequence(
+                            clipped,
+                            midiService.getCurrentProgram(),
+                            midiService.getReverbPreset(),
+                            midiService.getTranspose());
+                    List<TimedNoteEvent> events = buildTimedNoteEvents(prepared, midiService.getVelocityMap());
+                    double[] captureSize;
+                    try {
+                        captureSize = resolveCaptureSize();
+                    } catch (InterruptedException ex) {
+                        Thread.currentThread().interrupt();
+                        updateMessage("Cancelling…");
+                        cancel();
+                        return null;
+                    }
+                    double captureWidth = captureSize[0];
+                    double captureHeight = captureSize[1];
+                    double scale = Math.min(options.width() / Math.max(1.0, captureWidth),
+                            options.height() / Math.max(1.0, captureHeight));
+                    if (!Double.isFinite(scale) || scale <= 0.0) {
+                        scale = 1.0;
+                    }
+                    long stepMicros = Math.max(1L, 1_000_000L / Math.max(1, options.fps()));
+                    long totalMicros = Math.max(0L, prepared.getMicrosecondLength());
+                    long tailMicros = Math.max(0L, (long) Math.round(keyFallCanvas.getFallDurationSeconds() * 1_000_000.0));
+                    long limitMicros = totalMicros + tailMicros;
+
+                    VideoRecorder recorder = new VideoRecorder();
+                    boolean finished = false;
+                    try {
+                        recorder.begin(options.fps(), options.width(), options.height(), videoFile);
+                        FrameRenderer renderer = new FrameRenderer(events);
+                        try {
+                            runOnFxAndWait(renderer::reset);
+                        } catch (InterruptedException ex) {
+                            Thread.currentThread().interrupt();
+                            updateMessage("Cancelling…");
+                            cancel();
+                            return null;
+                        }
+                        boolean interrupted = false;
+                        for (long micros = 0; micros <= limitMicros && !cancelFlag.get(); micros += stepMicros) {
+                            WritableImage frame;
+                            try {
+                                frame = captureFrameAtMicros(renderer, micros, options.width(), options.height(), scale);
+                            } catch (InterruptedException ex) {
+                                Thread.currentThread().interrupt();
+                                interrupted = true;
+                                break;
+                            }
+                            recorder.pushFrame(frame);
+                            double ratio = limitMicros == 0 ? 1.0 : (double) micros / (double) limitMicros;
+                            updateProgress(0.5 + 0.5 * Math.min(1.0, ratio), 1.0);
+                        }
+                        if (!cancelFlag.get() && !interrupted && limitMicros % stepMicros != 0) {
+                            try {
+                                WritableImage frame = captureFrameAtMicros(renderer, limitMicros, options.width(), options.height(), scale);
+                                recorder.pushFrame(frame);
+                            } catch (InterruptedException ex) {
+                                Thread.currentThread().interrupt();
+                                interrupted = true;
+                            }
+                        }
+                        if (cancelFlag.get() || interrupted) {
+                            updateMessage("Cancelling…");
+                            cancel();
+                            return null;
+                        }
+                        recorder.end();
+                        finished = true;
+                    } finally {
+                        if (!finished) {
+                            recorder.abortQuietly();
+                        }
+                        try {
+                            runOnFxAndWait(() -> {
+                                keyFallCanvas.clear();
+                                releaseAllKeys();
+                            });
+                        } catch (InterruptedException ex) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }
+
+                    if (cancelFlag.get()) {
+                        updateMessage("Cancelling…");
+                        cancel();
+                        return null;
+                    }
+
+                    updateMessage("Muxing…");
+                    updateProgress(0.99, 1.0);
+                    new VideoRecorder().muxWithAudio(videoFile, audioFile, options.output(), videoSettings);
+                    updateProgress(1.0, 1.0);
+                    updateMessage("Done");
+                    return null;
+                } finally {
+                    try {
+                        Files.deleteIfExists(audioFile);
+                    } catch (IOException ignored) {
+                    }
+                    try {
+                        Files.deleteIfExists(videoFile);
+                    } catch (IOException ignored) {
+                    }
+                    try {
+                        Files.deleteIfExists(tempDir);
+                    } catch (IOException ignored) {
+                    }
+                }
             }
-            if (totalMicros % stepMicros != 0) {
-                WritableImage frame = captureFrameAtMicros(renderer, totalMicros, frameWidth, frameHeight, scale);
-                recorder.pushFrame(frame);
+        };
+    }
+
+    private double[] resolveCaptureSize() throws InterruptedException {
+        AtomicReference<double[]> ref = new AtomicReference<>();
+        runOnFxAndWait(() -> {
+            double width = Math.max(1.0, captureNode.getLayoutBounds().getWidth());
+            double height = Math.max(1.0, captureNode.getLayoutBounds().getHeight());
+            if (captureNode instanceof Region region) {
+                if (width <= 0 || height <= 0) {
+                    region.applyCss();
+                    region.layout();
+                    width = Math.max(1.0, region.getLayoutBounds().getWidth());
+                    height = Math.max(1.0, region.getLayoutBounds().getHeight());
+                }
             }
-        } finally {
-            recorder.end();
-            runOnFxAndWait(() -> {
-                keyFallCanvas.clear();
-                releaseAllKeys();
-            });
+            ref.set(new double[]{width, height});
+        });
+        return ref.get();
+    }
+
+    private Sequence clipSequence(Sequence source, long startMicros, long endMicros) throws Exception {
+        long length = source.getMicrosecondLength();
+        long start = Math.max(0L, Math.min(startMicros, length));
+        long end = Math.max(start, Math.min(endMicros, length));
+        if (start == 0 && end >= length) {
+            return source;
         }
+        long startTick = microsToTicks(source, start);
+        long endTick = microsToTicks(source, end);
+        Sequence clipped = new Sequence(source.getDivisionType(), source.getResolution());
+        javax.sound.midi.Track[] srcTracks = source.getTracks();
+        for (javax.sound.midi.Track src : srcTracks) {
+            javax.sound.midi.Track dst = clipped.createTrack();
+            MidiEvent tempoSnapshot = null;
+            for (int i = 0; i < src.size(); i++) {
+                MidiEvent event = src.get(i);
+                MidiMessage message = event.getMessage();
+                long tick = event.getTick();
+                if (tick < startTick) {
+                    if (message instanceof MetaMessage meta && meta.getType() == 0x51) {
+                        tempoSnapshot = new MidiEvent((MidiMessage) meta.clone(), 0L);
+                    }
+                    continue;
+                }
+                if (tick > endTick) {
+                    if (message instanceof ShortMessage shortMessage && isNoteOff(shortMessage)) {
+                        MidiMessage clone = (MidiMessage) shortMessage.clone();
+                        long adjusted = Math.max(0L, endTick - startTick);
+                        dst.add(new MidiEvent(clone, adjusted));
+                    }
+                    continue;
+                }
+                MidiMessage clone = (MidiMessage) message.clone();
+                long adjusted = Math.max(0L, tick - startTick);
+                dst.add(new MidiEvent(clone, adjusted));
+            }
+            if (tempoSnapshot != null) {
+                dst.add(tempoSnapshot);
+            }
+        }
+        if (clipped.getTracks().length == 0) {
+            clipped.createTrack();
+        }
+        return clipped;
+    }
+
+    private boolean isNoteOff(ShortMessage message) {
+        int command = message.getCommand();
+        return command == ShortMessage.NOTE_OFF
+                || (command == ShortMessage.NOTE_ON && message.getData2() == 0);
+    }
+
+    private long microsToTicks(Sequence sequence, long micros) throws Exception {
+        Sequencer converter = MidiSystem.getSequencer(false);
+        converter.open();
+        try {
+            converter.setSequence(sequence);
+            converter.setMicrosecondPosition(Math.max(0L, micros));
+            return converter.getTickPosition();
+        } finally {
+            converter.close();
+        }
+    }
+
+    private String formatMicrosAsTime(long micros) {
+        long totalSeconds = Math.max(0L, Math.round(micros / 1_000_000.0));
+        long minutes = totalSeconds / 60;
+        long seconds = totalSeconds % 60;
+        return String.format("%02d:%02d", minutes, seconds);
+    }
+
+    private long parseTimeToMicros(String text) {
+        if (text == null || text.isBlank()) {
+            throw new IllegalArgumentException("Enter time as mm:ss");
+        }
+        String trimmed = text.trim();
+        String[] parts = trimmed.split(":");
+        if (parts.length != 2) {
+            throw new IllegalArgumentException("Enter time as mm:ss");
+        }
+        int minutes;
+        double seconds;
+        try {
+            minutes = Integer.parseInt(parts[0]);
+            seconds = Double.parseDouble(parts[1]);
+        } catch (NumberFormatException ex) {
+            throw new IllegalArgumentException("Enter time as mm:ss");
+        }
+        if (minutes < 0 || seconds < 0) {
+            throw new IllegalArgumentException("Time cannot be negative");
+        }
+        double totalSeconds = minutes * 60.0 + seconds;
+        return (long) Math.round(totalSeconds * 1_000_000.0);
+    }
+
+    private record ExportOptions(int fps, int width, int height, long startMicros, long endMicros, Path output) {
     }
 
     private WritableImage captureFrameAtMicros(FrameRenderer renderer,

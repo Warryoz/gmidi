@@ -56,6 +56,24 @@ public class VideoRecorder {
         startInternal(outputFile, settings, true);
     }
 
+    public void begin(int fps, int width, int height, Path outputFile) throws IOException {
+        if (fps <= 0) {
+            throw new IllegalArgumentException("FPS must be positive");
+        }
+        if (width <= 0 || height <= 0) {
+            throw new IllegalArgumentException("Video dimensions must be positive");
+        }
+        VideoSettings settings = new VideoSettings();
+        settings.setFps(fps);
+        settings.setWidth(width);
+        settings.setHeight(height);
+        try {
+            beginFramePush(outputFile, settings);
+        } catch (IOException ex) {
+            throw friendly(ex);
+        }
+    }
+
     private void startInternal(Path outputFile, VideoSettings settings, boolean manual) throws IOException {
         Objects.requireNonNull(outputFile, "outputFile");
         Objects.requireNonNull(settings, "settings");
@@ -99,7 +117,7 @@ public class VideoRecorder {
             ffmpegProcess = builder.start();
         } catch (IOException ex) {
             ffmpegExecutablePath = null;
-            throw new IOException("Unable to start ffmpeg at " + builder.command().get(0) + ": " + ex.getMessage(), ex);
+            throw friendly(new IOException("Unable to start ffmpeg at " + builder.command().get(0) + ": " + ex.getMessage(), ex));
         }
 
         ffmpegCommand = List.copyOf(builder.command());
@@ -279,6 +297,31 @@ public class VideoRecorder {
         manualPush = false;
     }
 
+    public void abortQuietly() {
+        if (!running.getAndSet(false)) {
+            return;
+        }
+        ExecutorService executor = encoderExecutor;
+        if (executor != null) {
+            executor.shutdownNow();
+        }
+        try {
+            if (ffmpegInput != null) {
+                ffmpegInput.close();
+            }
+        } catch (IOException ignored) {
+        }
+        if (ffmpegProcess != null && ffmpegProcess.isAlive()) {
+            ffmpegProcess.destroyForcibly();
+        }
+        encoderExecutor = null;
+        ffmpegProcess = null;
+        ffmpegInput = null;
+        ffmpegExecutablePath = null;
+        ffmpegCommand = Collections.emptyList();
+        manualPush = false;
+    }
+
     private void logCommand() {
         if (ffmpegCommand.isEmpty()) {
             return;
@@ -366,5 +409,16 @@ public class VideoRecorder {
             builder.append(lines[i]).append('\n');
         }
         return builder.toString();
+    }
+
+    private IOException friendly(IOException ex) {
+        String message = ex.getMessage();
+        if (message != null) {
+            String lower = message.toLowerCase();
+            if (lower.contains("createprocess error=2") || lower.contains("no such file") || lower.contains("not found")) {
+                return new IOException("FFmpeg executable not found. Configure it in settings.", ex);
+            }
+        }
+        return ex;
     }
 }
