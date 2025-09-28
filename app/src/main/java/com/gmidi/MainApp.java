@@ -79,9 +79,17 @@ public class MainApp extends Application {
         replayPlayButton.getStyleClass().add("accent-button");
         Tooltip.install(replayPlayButton, new Tooltip("Replay last recording"));
 
+        Button replayPauseButton = new Button("Pause");
+        replayPauseButton.getStyleClass().add("accent-button");
+        Tooltip.install(replayPauseButton, new Tooltip("Pause playback"));
+
         Button replayStopButton = new Button("Stop");
         replayStopButton.getStyleClass().add("accent-button");
         Tooltip.install(replayStopButton, new Tooltip("Stop playback"));
+
+        Button openMidiButton = new Button("Open MIDI…");
+        openMidiButton.getStyleClass().add("accent-button");
+        Tooltip.install(openMidiButton, new Tooltip("Load a MIDI file for replay"));
 
         Button settingsButton = new Button("⚙");
         settingsButton.getStyleClass().add("icon-button");
@@ -102,7 +110,9 @@ public class MainApp extends Application {
                 fpsLabel,
                 fallControls,
                 replayPlayButton,
+                replayPauseButton,
                 replayStopButton,
+                openMidiButton,
                 settingsButton,
                 darkToggle);
         toolbar.setPadding(new Insets(16, 18, 12, 18));
@@ -172,11 +182,12 @@ public class MainApp extends Application {
                 fallDurationSlider,
                 fallDurationLabel,
                 replayPlayButton,
-                replayStopButton
+                replayPauseButton,
+                replayStopButton,
+                openMidiButton
         );
         refreshButton.setOnAction(e -> controller.refreshMidiInputs());
         settingsButton.setOnAction(e -> controller.showSettingsDialog(settingsButton));
-        videoRecordToggle.disableProperty().bind(midiRecordToggle.selectedProperty().not());
 
         controller.refreshMidiInputs();
 

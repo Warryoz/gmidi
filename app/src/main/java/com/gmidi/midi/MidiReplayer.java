@@ -14,8 +14,19 @@ import javax.sound.midi.Sequencer;
 import javax.sound.midi.ShortMessage;
 import javax.sound.midi.Synthesizer;
 import javax.sound.midi.Transmitter;
+import javax.sound.sampled.AudioFileFormat;
+import javax.sound.sampled.AudioFormat;
+import javax.sound.sampled.AudioInputStream;
+import javax.sound.sampled.AudioSystem;
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.IntSupplier;
+
+import com.sun.media.sound.AudioSynthesizer;
 
 /**
  * Replays recorded MIDI events through a shared {@link Sequencer}. Events are mirrored to both the
@@ -28,9 +39,13 @@ public final class MidiReplayer implements AutoCloseable {
     private final Receiver synthReceiver;
     private final Receiver visualReceiver;
     private final Transmitter transmitter;
+    private final IntSupplier transposeSupplier;
     private final VisualSink visualSink;
 
     private MidiService.MidiProgram program = new MidiService.MidiProgram(0, 0, 0, "GM Program 0");
+    private Sequence currentSequence;
+    private boolean sequenceFromFile;
+    private Path sequenceFile;
 
     private Runnable finishedListener;
 
@@ -43,13 +58,16 @@ public final class MidiReplayer implements AutoCloseable {
         void noteOff(int midi, long nanoTime);
     }
 
-    public MidiReplayer(VisualSink visualSink, Synthesizer synthesizer) throws MidiUnavailableException {
+    public MidiReplayer(VisualSink visualSink,
+                        Synthesizer synthesizer,
+                        IntSupplier transposeSupplier) throws MidiUnavailableException {
         this.visualSink = Objects.requireNonNull(visualSink, "visualSink");
         this.synthesizer = Objects.requireNonNull(synthesizer, "synthesizer");
         if (!synthesizer.isOpen()) {
             synthesizer.open();
         }
         this.synthReceiver = synthesizer.getReceiver();
+        this.transposeSupplier = Objects.requireNonNull(transposeSupplier, "transposeSupplier");
         this.sequencer = MidiSystem.getSequencer(false);
         sequencer.open();
         this.visualReceiver = new Receiver() {
@@ -64,7 +82,9 @@ public final class MidiReplayer implements AutoCloseable {
             }
         };
         this.transmitter = sequencer.getTransmitter();
-        this.transmitter.setReceiver(new TeeReceiver(synthReceiver, visualReceiver));
+        Receiver synthTarget = new TransposeReceiver(synthReceiver, transposeSupplier);
+        Receiver visualTarget = new TransposeReceiver(visualReceiver, transposeSupplier);
+        this.transmitter.setReceiver(new TeeReceiver(synthTarget, visualTarget));
         sequencer.addMetaEventListener(meta -> {
             if (meta.getType() == 0x2F) {
                 handleEndOfTrack();
@@ -88,6 +108,10 @@ public final class MidiReplayer implements AutoCloseable {
         builder.finish(ppq);
         sequencer.setSequence(sequence);
         sequencer.setTempoInBPM(bpm);
+        sequencer.setTickPosition(0);
+        currentSequence = sequence;
+        sequenceFromFile = false;
+        sequenceFile = null;
     }
 
     public void setProgram(MidiService.MidiProgram program) {
@@ -95,9 +119,19 @@ public final class MidiReplayer implements AutoCloseable {
     }
 
     public void play() {
-        sequencer.stop();
-        sequencer.setTickPosition(0);
+        if (currentSequence == null) {
+            return;
+        }
+        if (sequencer.getTickPosition() >= sequencer.getTickLength()) {
+            sequencer.setTickPosition(0);
+        }
         sequencer.start();
+    }
+
+    public void pause() {
+        if (sequencer.isRunning()) {
+            sequencer.stop();
+        }
     }
 
     public void stop() {
@@ -108,8 +142,104 @@ public final class MidiReplayer implements AutoCloseable {
         return sequencer.isRunning();
     }
 
+    public boolean isPaused() {
+        return !sequencer.isRunning() && sequencer.getTickPosition() > 0
+                && sequencer.getTickPosition() < sequencer.getTickLength();
+    }
+
+    public boolean hasSequence() {
+        return currentSequence != null;
+    }
+
+    public boolean isAtEnd() {
+        return currentSequence != null && sequencer.getTickPosition() >= sequencer.getTickLength();
+    }
+
+    public Sequence getCurrentSequence() {
+        return currentSequence;
+    }
+
+    public boolean isSequenceFromFile() {
+        return sequenceFromFile;
+    }
+
+    public Path getSequenceFile() {
+        return sequenceFile;
+    }
+
+    public void rewind() {
+        sequencer.setTickPosition(0);
+    }
+
     public void setTempoFactor(float factor) {
         sequencer.setTempoFactor(factor);
+    }
+
+    public void loadSequenceFromFile(File midiFile, MidiService.MidiProgram program)
+            throws IOException, InvalidMidiDataException {
+        Objects.requireNonNull(midiFile, "midiFile");
+        Sequence sequence = MidiSystem.getSequence(midiFile);
+        this.program = program != null ? program : new MidiService.MidiProgram(0, 0, 0, "GM Program 0");
+        ensureProgramEvent(sequence, this.program);
+        sequencer.setSequence(sequence);
+        sequencer.setTempoFactor(1.0f);
+        sequencer.setTickPosition(0);
+        currentSequence = sequence;
+        sequenceFromFile = true;
+        sequenceFile = midiFile.toPath();
+    }
+
+    public void renderToWav(Sequence sequence,
+                            Path output,
+                            MidiService.ReverbPreset preset,
+                            int transpose)
+            throws IOException, MidiUnavailableException {
+        Objects.requireNonNull(sequence, "sequence");
+        Objects.requireNonNull(output, "output");
+        Path parent = output.toAbsolutePath().getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+        AudioSynthesizer audioSynth = findAudioSynthesizer();
+        if (audioSynth == null) {
+            throw new IOException("No AudioSynthesizer implementation available");
+        }
+        AudioFormat format = new AudioFormat(44_100, 16, 2, true, false);
+        try (AudioInputStream stream = audioSynth.openStream(format, null)) {
+            Sequencer offlineSequencer = MidiSystem.getSequencer(false);
+            offlineSequencer.open();
+            try {
+                Receiver synthReceiver = audioSynth.getReceiver();
+                Receiver transposed = new TransposeReceiver(synthReceiver, () -> transpose);
+                offlineSequencer.getTransmitter().setReceiver(transposed);
+                applyPreset(audioSynth, preset);
+                offlineSequencer.setSequence(sequence);
+                offlineSequencer.setTickPosition(0);
+                Thread finisher = new Thread(() -> {
+                    try {
+                        while (offlineSequencer.isRunning()) {
+                            Thread.sleep(10);
+                        }
+                    } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        audioSynth.close();
+                    }
+                }, "gmidi-audio-render");
+                finisher.setDaemon(true);
+                offlineSequencer.start();
+                finisher.start();
+                AudioSystem.write(stream, AudioFileFormat.Type.WAVE, output.toFile());
+                try {
+                    finisher.join();
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                }
+            } finally {
+                offlineSequencer.stop();
+                offlineSequencer.close();
+            }
+        }
     }
 
     @Override
@@ -172,14 +302,7 @@ public final class MidiReplayer implements AutoCloseable {
         if (patch == null) {
             patch = new MidiService.MidiProgram(0, 0, 0, "GM Program 0");
         }
-        if (patch.bankMsb() != 0 || patch.bankLsb() != 0) {
-            ShortMessage bankMsb = new ShortMessage(ShortMessage.CONTROL_CHANGE, 0, 0, clamp7bit(patch.bankMsb()));
-            track.add(new MidiEvent(bankMsb, 0));
-            ShortMessage bankLsb = new ShortMessage(ShortMessage.CONTROL_CHANGE, 0, 32, clamp7bit(patch.bankLsb()));
-            track.add(new MidiEvent(bankLsb, 0));
-        }
-        ShortMessage pc = new ShortMessage(ShortMessage.PROGRAM_CHANGE, 0, clamp7bit(patch.program()), 0);
-        track.add(new MidiEvent(pc, 0));
+        addProgramEvents(track, patch);
     }
 
     private int clamp7bit(int value) {
@@ -190,6 +313,101 @@ public final class MidiReplayer implements AutoCloseable {
             return 127;
         }
         return value;
+    }
+
+    private void ensureProgramEvent(Sequence sequence, MidiService.MidiProgram patch) throws InvalidMidiDataException {
+        if (patch == null) {
+            patch = new MidiService.MidiProgram(0, 0, 0, "GM Program 0");
+        }
+        javax.sound.midi.Track[] tracks = sequence.getTracks();
+        if (tracks.length == 0) {
+            sequence.createTrack();
+            tracks = sequence.getTracks();
+        }
+        addProgramEvents(tracks[0], patch);
+    }
+
+    private void addProgramEvents(javax.sound.midi.Track track, MidiService.MidiProgram patch)
+            throws InvalidMidiDataException {
+        if (patch.bankMsb() != 0 || patch.bankLsb() != 0) {
+            ShortMessage bankMsb = new ShortMessage(ShortMessage.CONTROL_CHANGE, 0, 0, clamp7bit(patch.bankMsb()));
+            track.add(new MidiEvent(bankMsb, 0));
+            ShortMessage bankLsb = new ShortMessage(ShortMessage.CONTROL_CHANGE, 0, 32, clamp7bit(patch.bankLsb()));
+            track.add(new MidiEvent(bankLsb, 0));
+        }
+        ShortMessage pc = new ShortMessage(ShortMessage.PROGRAM_CHANGE, 0, clamp7bit(patch.program()), 0);
+        track.add(new MidiEvent(pc, 0));
+    }
+
+    private AudioSynthesizer findAudioSynthesizer() throws MidiUnavailableException {
+        Synthesizer synth = MidiSystem.getSynthesizer();
+        if (synth instanceof AudioSynthesizer audioSynth) {
+            return audioSynth;
+        }
+        for (javax.sound.midi.MidiDevice.Info info : MidiSystem.getMidiDeviceInfo()) {
+            javax.sound.midi.MidiDevice device = MidiSystem.getMidiDevice(info);
+            if (device instanceof AudioSynthesizer audioSynth) {
+                return audioSynth;
+            }
+        }
+        return null;
+    }
+
+    private void applyPreset(AudioSynthesizer synth, MidiService.ReverbPreset preset) {
+        if (preset == null) {
+            preset = MidiService.ReverbPreset.ROOM;
+        }
+        javax.sound.midi.MidiChannel[] channels = synth.getChannels();
+        if (channels == null) {
+            return;
+        }
+        for (javax.sound.midi.MidiChannel channel : channels) {
+            if (channel != null) {
+                channel.controlChange(91, clamp7bit(preset.reverbCc()));
+                channel.controlChange(93, clamp7bit(preset.chorusCc()));
+            }
+        }
+    }
+
+    private final class TransposeReceiver implements Receiver {
+        private final Receiver out;
+        private final IntSupplier semitoneSupplier;
+
+        private TransposeReceiver(Receiver out, IntSupplier semitoneSupplier) {
+            this.out = out;
+            this.semitoneSupplier = semitoneSupplier;
+        }
+
+        @Override
+        public void send(MidiMessage message, long timeStamp) {
+            if (!(message instanceof ShortMessage shortMessage)) {
+                out.send(message, timeStamp);
+                return;
+            }
+            int command = shortMessage.getCommand();
+            int channel = shortMessage.getChannel();
+            if ((command == ShortMessage.NOTE_ON || command == ShortMessage.NOTE_OFF) && channel != 9) {
+                int semis = semitoneSupplier.getAsInt();
+                if (semis != 0) {
+                    int note = clamp7bit(shortMessage.getData1() + semis);
+                    int velocity = shortMessage.getData2();
+                    try {
+                        ShortMessage shifted = new ShortMessage();
+                        shifted.setMessage(command, channel, note, velocity);
+                        out.send(shifted, timeStamp);
+                        return;
+                    } catch (InvalidMidiDataException ignored) {
+                        // Fall through to original event.
+                    }
+                }
+            }
+            out.send(message, timeStamp);
+        }
+
+        @Override
+        public void close() {
+            out.close();
+        }
     }
 
     private static final class TeeReceiver implements Receiver {
