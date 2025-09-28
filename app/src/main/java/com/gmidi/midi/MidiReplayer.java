@@ -237,6 +237,8 @@ public final class MidiReplayer implements AutoCloseable {
                 } catch (InterruptedException ex) {
                     Thread.currentThread().interrupt();
                 }
+            } catch (InvalidMidiDataException e) {
+                throw new RuntimeException(e);
             } finally {
                 offlineSequencer.stop();
                 offlineSequencer.close();

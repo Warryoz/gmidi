@@ -152,6 +152,7 @@
 
 .choice-box .context-menu {
     -fx-background-color: rgba(24,24,24,0.95);
+    -fx-text-fill: white;
 }
 
 .settings-dialog .button {
