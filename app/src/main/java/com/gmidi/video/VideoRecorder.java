@@ -247,6 +247,56 @@ public class VideoRecorder {
         System.out.println("[VideoRecorder] Command: " + String.join(" ", sanitised));
     }
 
+    public void muxWithAudio(Path videoFile, Path audioFile, Path outputFile, VideoSettings settings) throws IOException {
+        Objects.requireNonNull(videoFile, "videoFile");
+        Objects.requireNonNull(audioFile, "audioFile");
+        Objects.requireNonNull(outputFile, "outputFile");
+        Objects.requireNonNull(settings, "settings");
+        Path parent = outputFile.toAbsolutePath().getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+        String ffmpegPath = FfmpegLocator.resolve(settings);
+        List<String> command = List.of(
+                ffmpegPath,
+                "-y",
+                "-i",
+                videoFile.toAbsolutePath().toString(),
+                "-i",
+                audioFile.toAbsolutePath().toString(),
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-shortest",
+                outputFile.toAbsolutePath().toString()
+        );
+        ProcessBuilder builder = new ProcessBuilder(command);
+        builder.redirectErrorStream(true);
+        Process process = null;
+        try {
+            process = builder.start();
+            StringBuilder output = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    output.append(line).append('\n');
+                }
+            }
+            int exit = process.waitFor();
+            if (exit != 0) {
+                throw new IOException("ffmpeg mux failed with code " + exit + "\n" + output);
+            }
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw new IOException("ffmpeg mux interrupted", ex);
+        } finally {
+            if (process != null && process.isAlive()) {
+                process.destroyForcibly();
+            }
+        }
+    }
+
     private String summarise(String stderr) {
         if (stderr == null || stderr.isBlank()) {
             return "(no stderr output)";

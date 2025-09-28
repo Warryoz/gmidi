@@ -41,6 +41,8 @@ public class MidiService {
     private final List<String> instrumentNames = new ArrayList<>();
     private Instrument[] availableInstruments = new Instrument[0];
     private MidiProgram currentProgram = MidiProgram.gmPiano();
+    private volatile int transposeSemis;
+    private volatile ReverbPreset reverbPreset = ReverbPreset.ROOM;
 
     public List<MidiInput> listInputs() throws MidiUnavailableException {
         List<MidiInput> result = new ArrayList<>();
@@ -121,6 +123,7 @@ public class MidiService {
         MidiChannel[] channels = synthesizer.getChannels();
         primaryChannel = channels.length > 0 ? channels[0] : null;
         refreshInstruments();
+        applyReverb(reverbPreset);
     }
 
     /**
@@ -144,6 +147,7 @@ public class MidiService {
             sendProgram(0, 0, program);
             currentProgram = new MidiProgram(0, 0, program, "GM Program " + program);
         }
+        applyReverb(reverbPreset);
         return currentProgram.displayName();
     }
 
@@ -190,6 +194,48 @@ public class MidiService {
         defaultBankLoaded = false;
         defaultSoundbank = null;
         primaryChannel = null;
+        transposeSemis = 0;
+    }
+
+    public int getTranspose() {
+        return transposeSemis;
+    }
+
+    public void setTranspose(int semitones) {
+        int clamped = Math.max(-24, Math.min(24, semitones));
+        transposeSemis = clamped;
+        sendAllNotesOff();
+    }
+
+    public ReverbPreset getReverbPreset() {
+        return reverbPreset;
+    }
+
+    public void setReverbPreset(ReverbPreset preset) {
+        if (preset == null) {
+            preset = ReverbPreset.ROOM;
+        }
+        reverbPreset = preset;
+        applyReverb(preset);
+    }
+
+    public void applyReverb(ReverbPreset preset) {
+        if (synthesizer == null) {
+            return;
+        }
+        if (preset == null) {
+            preset = ReverbPreset.ROOM;
+        }
+        MidiChannel[] channels = synthesizer.getChannels();
+        if (channels == null) {
+            return;
+        }
+        for (MidiChannel channel : channels) {
+            if (channel != null) {
+                channel.controlChange(91, clamp7bit(preset.reverbCc()));
+                channel.controlChange(93, clamp7bit(preset.chorusCc()));
+            }
+        }
     }
 
     private void publishNoteOn(int note, int velocity, long nanoTime) {
@@ -391,22 +437,23 @@ public class MidiService {
         }
 
         private void handleShortMessage(ShortMessage shortMessage, long now) {
-            sendToSynth(shortMessage);
-            switch (shortMessage.getCommand()) {
+            ShortMessage routed = transposeIfNeeded(shortMessage);
+            sendToSynth(routed);
+            switch (routed.getCommand()) {
                 case ShortMessage.NOTE_ON -> {
-                    int velocity = shortMessage.getData2();
-                    int note = shortMessage.getData1();
+                    int velocity = routed.getData2();
+                    int note = routed.getData1();
                     if (velocity == 0) {
                         publishNoteOff(note, now);
                     } else {
                         publishNoteOn(note, velocity, now);
                     }
                 }
-                case ShortMessage.NOTE_OFF -> publishNoteOff(shortMessage.getData1(), now);
+                case ShortMessage.NOTE_OFF -> publishNoteOff(routed.getData1(), now);
                 case ShortMessage.CONTROL_CHANGE -> {
-                    int controller = shortMessage.getData1();
+                    int controller = routed.getData1();
                     if (controller == 64) {
-                        publishSustain(shortMessage.getData2() >= 64, now);
+                        publishSustain(routed.getData2() >= 64, now);
                     }
                 }
                 default -> {
@@ -427,6 +474,43 @@ public class MidiService {
         @Override
         public void close() {
             // Devices close their own receivers when the transmitter is closed.
+        }
+    }
+
+    private ShortMessage transposeIfNeeded(ShortMessage message) {
+        int semis = transposeSemis;
+        if (semis == 0) {
+            return message;
+        }
+        int command = message.getCommand();
+        int channel = message.getChannel();
+        if ((command == ShortMessage.NOTE_ON || command == ShortMessage.NOTE_OFF) && channel != 9) {
+            int note = clamp7bit(message.getData1() + semis);
+            int velocity = message.getData2();
+            try {
+                ShortMessage shifted = new ShortMessage();
+                shifted.setMessage(command, channel, note, velocity);
+                return shifted;
+            } catch (InvalidMidiDataException ex) {
+                return message;
+            }
+        }
+        return message;
+    }
+
+    private void sendAllNotesOff() {
+        if (synthesizer == null) {
+            return;
+        }
+        MidiChannel[] channels = synthesizer.getChannels();
+        if (channels == null) {
+            return;
+        }
+        for (MidiChannel channel : channels) {
+            if (channel != null) {
+                channel.allNotesOff();
+                channel.allSoundOff();
+            }
         }
     }
 
@@ -453,6 +537,35 @@ public class MidiService {
     public record MidiProgram(int bankMsb, int bankLsb, int program, String displayName) {
         private static MidiProgram gmPiano() {
             return new MidiProgram(0, 0, 0, "GM Program 0");
+        }
+    }
+
+    public enum ReverbPreset {
+        ROOM("Room", 40, 10),
+        HALL("Hall", 75, 20),
+        STADIUM("Stadium", 100, 35);
+
+        private final String label;
+        private final int reverbCc;
+        private final int chorusCc;
+
+        ReverbPreset(String label, int reverbCc, int chorusCc) {
+            this.label = label;
+            this.reverbCc = reverbCc;
+            this.chorusCc = chorusCc;
+        }
+
+        public int reverbCc() {
+            return reverbCc;
+        }
+
+        public int chorusCc() {
+            return chorusCc;
+        }
+
+        @Override
+        public String toString() {
+            return label;
         }
     }
 }

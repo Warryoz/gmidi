@@ -21,8 +21,11 @@ public class KeyboardView extends Region {
 
     private static final double FLASH_DURATION_MS = 120.0;
     private static final Color FLASH_COLOR = Color.web("#2CE4D0");
+    private static final double MIN_HEIGHT = 140.0;
+    private static final double MAX_HEIGHT = 260.0;
+    private static final double DEFAULT_HEIGHT_RATIO = PianoKeyLayout.KEYBOARD_HEIGHT_RATIO;
 
-    private final Canvas canvas = new Canvas(800, 120);
+    private final Canvas canvas = new Canvas(800, 160);
     private final boolean[] pressed = new boolean[128];
     private final long[] flashStartNanos = new long[128];
     private final double[] flashIntensity = new double[128];
@@ -46,9 +49,9 @@ public class KeyboardView extends Region {
         getChildren().add(canvas);
         setPadding(new Insets(12, 16, 12, 16));
         setMaxWidth(Double.MAX_VALUE);
-        setMinHeight(120);
-        setPrefHeight(160);
-        setMaxHeight(200);
+        setMinHeight(MIN_HEIGHT);
+        setPrefHeight(clampHeight(800 * DEFAULT_HEIGHT_RATIO));
+        setMaxHeight(MAX_HEIGHT);
         canvas.addEventHandler(MouseEvent.MOUSE_MOVED, e -> handleHover(e, true));
         canvas.addEventHandler(MouseEvent.MOUSE_EXITED, e -> handleHover(e, false));
     }
@@ -189,7 +192,7 @@ public class KeyboardView extends Region {
     }
 
     private void drawBlackKeys(GraphicsContext gc, double width, double height, long nowNanos) {
-        double blackKeyHeight = height * 0.62;
+        double blackKeyHeight = PianoKeyLayout.blackKeyHeight(height);
         Color base = Color.web("#1E1E1E");
         Color highlight = Color.web("#2CE4D0");
 
@@ -230,5 +233,15 @@ public class KeyboardView extends Region {
             return 0;
         }
         return base * (1.0 - (elapsedMs / FLASH_DURATION_MS));
+    }
+
+    private double clampHeight(double desired) {
+        if (desired < MIN_HEIGHT) {
+            return MIN_HEIGHT;
+        }
+        if (desired > MAX_HEIGHT) {
+            return MAX_HEIGHT;
+        }
+        return desired;
     }
 }
