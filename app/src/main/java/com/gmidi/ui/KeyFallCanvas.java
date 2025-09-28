@@ -1,5 +1,6 @@
 package com.gmidi.ui;
 
+import javafx.animation.AnimationTimer;
 import javafx.beans.InvalidationListener;
 import javafx.geometry.Bounds;
 import javafx.scene.canvas.Canvas;
@@ -29,33 +30,44 @@ public class KeyFallCanvas extends Canvas {
     private static final double MIN_NOTE_HEIGHT = 6.0;
     private static final double NOTE_MARGIN = 32.0;
     private static final Color BACKGROUND = Color.web("#101010");
-    private static final double MAX_DIMENSION = 8192.0;
     private static final Color NOTE_COLOR = Color.web("#2CE4D0");
-    private static final int MIN_W = 640;
-    private static final int MIN_H = 360;
-
-    private static int even(int value) {
-        return value & ~1;
-    }
-
-    private static int normalizeToEvenPx(double value, int min) {
-        double clamped = Math.max(1.0, Math.min(MAX_DIMENSION, value));
-        int px = (int) Math.max(min, Math.round(clamped));
-        return even(px);
-    }
+    private static final int MIN_W = 320;
+    private static final int MIN_H = 180;
+    private static final int MAX_W = 4096;
+    private static final int MAX_H = 4096;
 
     private final List<NoteSprite> sprites = new ArrayList<>();
     private final Deque<NoteSprite> pool = new ArrayDeque<>();
     @SuppressWarnings("unchecked")
     private final Deque<NoteSprite>[] activePerNote = new Deque[128];
 
-    private final InvalidationListener viewportBoundsListener = obs -> applyViewportBounds();
+    private final InvalidationListener viewportBoundsListener = obs -> {
+        if (boundViewport != null) {
+            scheduleViewportApply(boundViewport.getLayoutBounds());
+        }
+    };
 
     private Region boundViewport;
     private boolean sustainPedal;
     private double windowSeconds = DEFAULT_WINDOW_SECONDS;
-    private long lastTickNanos;
     private boolean renderRequested = true;
+
+    /**
+     * The canvas keeps a fixed backing size inside the safe [MIN, MAX] range and maps the viewport
+     * into it using these scale factors. This avoids constantly reallocating large RT textures while
+     * still matching the visible region exactly.
+     */
+    private double renderScaleX = 1.0;
+    private double renderScaleY = 1.0;
+    private int canvasW = 1280;
+    private int canvasH = 720;
+    private double viewportWidth = MIN_W;
+    private double viewportHeight = MIN_H;
+
+    private double pendingViewportWidth = MIN_W;
+    private double pendingViewportHeight = MIN_H;
+    private boolean pendingApply;
+    private AnimationTimer resizeCoalescer;
 
     public KeyFallCanvas() {
         super(1, 1);
@@ -75,13 +87,13 @@ public class KeyFallCanvas extends Canvas {
     public void bindTo(Region viewport) {
         Objects.requireNonNull(viewport, "viewport");
         if (viewport == boundViewport) {
-            applyViewportBounds();
+            scheduleViewportApply(boundViewport.getLayoutBounds());
             return;
         }
         unbindViewport();
         boundViewport = viewport;
         boundViewport.layoutBoundsProperty().addListener(viewportBoundsListener);
-        applyViewportBounds();
+        scheduleViewportApply(boundViewport.getLayoutBounds());
     }
 
     public void unbindViewport() {
@@ -89,24 +101,74 @@ public class KeyFallCanvas extends Canvas {
             boundViewport.layoutBoundsProperty().removeListener(viewportBoundsListener);
             boundViewport = null;
         }
+        if (resizeCoalescer != null) {
+            resizeCoalescer.stop();
+        }
+        pendingApply = false;
     }
 
-    private void applyViewportBounds() {
-        if (boundViewport == null) {
-            return;
-        }
-        Bounds bounds = boundViewport.getLayoutBounds();
+    /**
+     * Coalesces resize events so the canvas is only resized once per JavaFX pulse. Directly
+     * resizing the canvas for every layout invalidation tends to thrash backing textures and can
+     * trigger RT texture allocation failures on some GPUs.
+     */
+    private void scheduleViewportApply(Bounds bounds) {
         if (bounds == null) {
             return;
         }
-        int newWidth = normalizeToEvenPx(bounds.getWidth(), MIN_W);
-        int newHeight = normalizeToEvenPx(bounds.getHeight(), MIN_H);
-        boolean changed = newWidth != (int) getWidth() || newHeight != (int) getHeight();
-        if (!changed) {
+        double width = Math.max(MIN_W, bounds.getWidth());
+        double height = Math.max(MIN_H, bounds.getHeight());
+        if (!Double.isFinite(width) || !Double.isFinite(height)) {
             return;
         }
-        setWidth(newWidth);
-        setHeight(newHeight);
+        pendingViewportWidth = width;
+        pendingViewportHeight = height;
+        if (pendingApply) {
+            return;
+        }
+        pendingApply = true;
+        if (resizeCoalescer == null) {
+            resizeCoalescer = new AnimationTimer() {
+                @Override
+                public void handle(long now) {
+                    pendingApply = false;
+                    stop();
+                    applyBoundsOnce(pendingViewportWidth, pendingViewportHeight);
+                }
+            };
+        }
+        resizeCoalescer.stop();
+        resizeCoalescer.start();
+    }
+
+    private void applyBoundsOnce(double viewportW, double viewportH) {
+        double vw = Math.max(MIN_W, viewportW);
+        double vh = Math.max(MIN_H, viewportH);
+        if (!Double.isFinite(vw) || !Double.isFinite(vh)) {
+            return;
+        }
+
+        viewportWidth = vw;
+        viewportHeight = vh;
+
+        int targetW = (int) Math.min(MAX_W, Math.round(vw));
+        int targetH = (int) Math.min(MAX_H, Math.round(vh));
+        targetW = Math.max(MIN_W, targetW);
+        targetH = Math.max(MIN_H, targetH);
+
+        if (targetW != canvasW || targetH != canvasH) {
+            canvasW = targetW;
+            canvasH = targetH;
+            setWidth(canvasW);
+            setHeight(canvasH);
+        }
+
+        // Rendering happens in viewport coordinates – the scale simply maps that space to the
+        // allocated canvas pixels so visual content never stretches even if the backing size is
+        // clamped.
+        renderScaleX = canvasW / vw;
+        renderScaleY = canvasH / vh;
+
         requestRender();
     }
 
@@ -205,14 +267,13 @@ public class KeyFallCanvas extends Canvas {
     }
 
     /**
-     * Advances the animation to {@code nowNanos}. The canvas keeps track of the last timestamp so it
-     * can redraw immediately in response to resizes without allocating new backing textures.
+     * Advances the animation to {@code nowNanos}. Drawing only happens when a repaint was requested
+     * or active sprites are visible so idle sessions remain inexpensive.
      */
     public void tick(long nowNanos) {
         if (nowNanos <= 0) {
             nowNanos = System.nanoTime();
         }
-        lastTickNanos = nowNanos;
         if (!renderRequested && sprites.isEmpty()) {
             return;
         }
@@ -221,10 +282,20 @@ public class KeyFallCanvas extends Canvas {
     }
 
     private void draw(long nowNanos) {
-        double width = Math.max(1.0, getWidth());
-        double height = Math.max(1.0, getHeight());
         GraphicsContext gc = getGraphicsContext2D();
-        gc.clearRect(0, 0, width, height);
+        double pixelWidth = Math.max(1.0, getWidth());
+        double pixelHeight = Math.max(1.0, getHeight());
+        gc.save();
+        gc.clearRect(0, 0, pixelWidth, pixelHeight);
+
+        double width = Math.max(MIN_W, viewportWidth);
+        double height = Math.max(MIN_H, viewportHeight);
+        if (!Double.isFinite(width) || !Double.isFinite(height)) {
+            gc.restore();
+            return;
+        }
+
+        gc.scale(renderScaleX, renderScaleY);
         gc.setFill(BACKGROUND);
         gc.fillRect(0, 0, width, height);
 
@@ -260,6 +331,8 @@ public class KeyFallCanvas extends Canvas {
                 continue;
             }
 
+            // Map timestamps to Y positions: newer events sit near the bottom of the viewport and
+            // older events move upwards until they leave the visible window.
             double bottom = height - ((viewEnd - visibleEnd) * pixelsPerNano);
             double top = height - ((viewEnd - visibleStart) * pixelsPerNano);
             double noteHeight = bottom - top;
@@ -275,6 +348,10 @@ public class KeyFallCanvas extends Canvas {
                 continue;
             }
             if (top > height + NOTE_MARGIN) {
+                continue;
+            }
+
+            if (sprite.note < PianoKeyLayout.FIRST_MIDI_NOTE || sprite.note > PianoKeyLayout.LAST_MIDI_NOTE) {
                 continue;
             }
 
@@ -295,6 +372,8 @@ public class KeyFallCanvas extends Canvas {
             gc.setFill(NOTE_COLOR.deriveColor(0, 1, 1, alpha));
             gc.fillRoundRect(keyLeft, top, keyWidth, noteHeight, 12, 12);
         }
+
+        gc.restore();
     }
 
     private void recycle(Iterator<NoteSprite> iterator, NoteSprite sprite) {
