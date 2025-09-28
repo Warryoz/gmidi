@@ -805,28 +805,38 @@ public class SessionController {
         int frameHeight = Math.max(1, (int) Math.round(captureHeight * scale));
         long tailMicros = (long) Math.round(Math.max(0.0, keyFallCanvas.getFallDurationSeconds()) * 1_000_000.0);
 
+        final Sequence exportSequence = sequence;
+        final Path audioTempPath = audioTemp;
+        final Path videoTempPath = videoTemp;
+        final Path finalVideoPath = finalVideo;
+        final int exportFps = fps;
+        final int exportFrameWidth = frameWidth;
+        final int exportFrameHeight = frameHeight;
+        final double exportScale = scale;
+        final long exportTailMicros = tailMicros;
+
         Thread worker = new Thread(() -> {
             try {
                 Sequence prepared = OfflineAudioRenderer.prepareSequence(
-                        sequence,
+                        exportSequence,
                         midiService.getCurrentProgram(),
                         midiService.getTranspose());
                 OfflineAudioRenderer.renderWav(
-                        sequence,
+                        exportSequence,
                         midiService.getCurrentProgram(),
                         midiService.getTranspose(),
                         midiService.getVelocityMap(),
                         midiService.getReverbPreset(),
                         midiService.getCustomSoundbank(),
-                        audioTemp.toFile());
+                        audioTempPath.toFile());
                 List<TimedNoteEvent> events = buildTimedNoteEvents(prepared, midiService.getVelocityMap());
-                renderFramesToVideo(events, videoTemp, fps, frameWidth, frameHeight, scale, tailMicros);
-                new VideoRecorder().muxWithAudio(videoTemp, audioTemp, finalVideo, videoSettings);
+                renderFramesToVideo(events, videoTempPath, exportFps, exportFrameWidth, exportFrameHeight, exportScale, exportTailMicros);
+                new VideoRecorder().muxWithAudio(videoTempPath, audioTempPath, finalVideoPath, videoSettings);
                 Platform.runLater(() -> {
-                    currentVideoFile = finalVideo;
+                    currentVideoFile = finalVideoPath;
                     currentVideoTempFile = null;
                     currentAudioFile = null;
-                    statusLabel.setText("Saved video " + finalVideo.getFileName());
+                    statusLabel.setText("Saved video " + finalVideoPath.getFileName());
                 });
             } catch (InterruptedException ex) {
                 Thread.currentThread().interrupt();
@@ -835,11 +845,11 @@ public class SessionController {
                 Platform.runLater(() -> statusLabel.setText("Export failed: " + ex.getMessage()));
             } finally {
                 try {
-                    Files.deleteIfExists(audioTemp);
+                    Files.deleteIfExists(audioTempPath);
                 } catch (IOException ignored) {
                 }
                 try {
-                    Files.deleteIfExists(videoTemp);
+                    Files.deleteIfExists(videoTempPath);
                 } catch (IOException ignored) {
                 }
                 Platform.runLater(() -> {

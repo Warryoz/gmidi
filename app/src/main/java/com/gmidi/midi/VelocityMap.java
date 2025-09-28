@@ -5,7 +5,7 @@ package com.gmidi.midi;
  */
 public final class VelocityMap {
 
-    private VelCurve curve = VelCurve.LINEAR;
+    private volatile VelCurve curve = VelCurve.LINEAR;
 
     public void setCurve(VelCurve c) {
         curve = c == null ? VelCurve.LINEAR : c;
