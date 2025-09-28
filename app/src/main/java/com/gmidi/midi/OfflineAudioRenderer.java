@@ -24,6 +24,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.LongConsumer;
 
 /** Utility class that renders MIDI sequences to audio files offline. */
 public final class OfflineAudioRenderer {
@@ -73,6 +75,26 @@ public final class OfflineAudioRenderer {
                                  VelocityMap velocityMap,
                                  Soundbank customSoundbank,
                                  File outputFile) throws Exception {
+        renderWav(sequence,
+                program,
+                transposeSemis,
+                velocityMap,
+                reverbPreset,
+                customSoundbank,
+                outputFile,
+                null,
+                null);
+    }
+
+    public static void renderWav(Sequence sequence,
+                                 MidiService.MidiProgram program,
+                                 int transposeSemis,
+                                 VelocityMap velocityMap,
+                                 MidiService.ReverbPreset reverbPreset,
+                                 Soundbank customSoundbank,
+                                 File outputFile,
+                                 LongConsumer progressMicros,
+                                 AtomicBoolean cancelFlag) throws Exception {
         if (sequence == null) {
             throw new IllegalArgumentException("sequence null");
         }
@@ -103,9 +125,48 @@ public final class OfflineAudioRenderer {
                         new VelocityReceiver(synth.getReceiver(), velocityMap))) {
                     sequencer.setSequence(playable);
                     sequencer.setTickPosition(0);
-                    sequencer.start();
-                    AudioSystem.write(stream, AudioFileFormat.Type.WAVE, out);
-                    sequencer.stop();
+                    AtomicBoolean running = new AtomicBoolean(true);
+                    Thread monitor = null;
+                    if (progressMicros != null || cancelFlag != null) {
+                        monitor = new Thread(() -> {
+                            try {
+                                while (running.get()) {
+                                    if (cancelFlag != null && cancelFlag.get()) {
+                                        sequencer.stop();
+                                        break;
+                                    }
+                                    if (progressMicros != null) {
+                                        progressMicros.accept(Math.max(0L, sequencer.getMicrosecondPosition()));
+                                    }
+                                    Thread.sleep(100);
+                                }
+                            } catch (InterruptedException ignored) {
+                                Thread.currentThread().interrupt();
+                            }
+                        }, "gmidi-audio-progress");
+                        monitor.setDaemon(true);
+                        monitor.start();
+                    }
+                    try {
+                        sequencer.start();
+                        AudioSystem.write(stream, AudioFileFormat.Type.WAVE, out);
+                        sequencer.stop();
+                    } finally {
+                        running.set(false);
+                        if (monitor != null) {
+                            try {
+                                monitor.join();
+                            } catch (InterruptedException ex) {
+                                Thread.currentThread().interrupt();
+                            }
+                        }
+                    }
+                    if (progressMicros != null) {
+                        progressMicros.accept(sequence.getMicrosecondLength());
+                    }
+                    if (cancelFlag != null && cancelFlag.get()) {
+                        throw new InterruptedException("Audio render cancelled");
+                    }
                 }
             } finally {
                 sequencer.close();
