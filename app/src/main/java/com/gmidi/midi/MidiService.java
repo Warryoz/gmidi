@@ -1,11 +1,14 @@
 package com.gmidi.midi;
 
 import javax.sound.midi.InvalidMidiDataException;
+import javax.sound.midi.Instrument;
 import javax.sound.midi.MetaMessage;
+import javax.sound.midi.MidiChannel;
 import javax.sound.midi.MidiDevice;
 import javax.sound.midi.MidiMessage;
 import javax.sound.midi.MidiSystem;
 import javax.sound.midi.MidiUnavailableException;
+import javax.sound.midi.Patch;
 import javax.sound.midi.Receiver;
 import javax.sound.midi.ShortMessage;
 import javax.sound.midi.Soundbank;
@@ -31,7 +34,13 @@ public class MidiService {
     private Synthesizer synthesizer;
     private Receiver synthReceiver;
     private Soundbank customSoundbank;
+    private Soundbank defaultSoundbank;
+    private boolean defaultBankLoaded;
+    private MidiChannel primaryChannel;
     private String currentSoundFontPath;
+    private final List<String> instrumentNames = new ArrayList<>();
+    private Instrument[] availableInstruments = new Instrument[0];
+    private MidiProgram currentProgram = MidiProgram.gmPiano();
 
     public List<MidiInput> listInputs() throws MidiUnavailableException {
         List<MidiInput> result = new ArrayList<>();
@@ -91,27 +100,60 @@ public class MidiService {
         listeners.remove(listener);
     }
 
-    public synchronized Synthesizer ensureSynth(String soundFontPath)
-            throws MidiUnavailableException, InvalidMidiDataException, IOException {
+    /**
+     * Opens the shared synthesizer and optionally loads a custom SoundFont. Failures bubble up so
+     * the caller can surface a friendly message and fall back to the default bank.
+     */
+    public synchronized void initSynth(String soundFontPath) throws Exception {
         if (synthesizer == null) {
             synthesizer = MidiSystem.getSynthesizer();
             synthesizer.open();
             synthReceiver = synthesizer.getReceiver();
-            Soundbank defaultBank = synthesizer.getDefaultSoundbank();
-            if (defaultBank != null) {
-                synthesizer.loadAllInstruments(defaultBank);
+            defaultSoundbank = synthesizer.getDefaultSoundbank();
+            if (defaultSoundbank != null) {
+                defaultBankLoaded = synthesizer.loadAllInstruments(defaultSoundbank);
             }
         }
-        String normalized = (soundFontPath != null && !soundFontPath.isBlank()) ? soundFontPath : null;
+        String normalized = normalize(soundFontPath);
         if (!Objects.equals(currentSoundFontPath, normalized)) {
             applySoundFont(normalized);
         }
-        return synthesizer;
+        MidiChannel[] channels = synthesizer.getChannels();
+        primaryChannel = channels.length > 0 ? channels[0] : null;
+        refreshInstruments();
     }
 
-    public synchronized void reloadSoundFont(String soundFontPath)
-            throws MidiUnavailableException, InvalidMidiDataException, IOException {
-        ensureSynth(soundFontPath);
+    /**
+     * Chooses an instrument by name if possible. The search is case-insensitive and falls back to
+     * General MIDI program 0 when no match is found.
+     */
+    public synchronized String applyInstrument(String preferName, Integer gmProgram) {
+        ensureSynthReady();
+        Instrument chosen = findInstrument(preferName);
+        if (chosen != null) {
+            synthesizer.loadInstrument(chosen);
+            Patch patch = chosen.getPatch();
+            int program = patch.getProgram() & 0x7F;
+            int bank = patch.getBank();
+            int bankMsb = (bank >> 7) & 0x7F;
+            int bankLsb = bank & 0x7F;
+            sendProgram(bankMsb, bankLsb, program);
+            currentProgram = new MidiProgram(bankMsb, bankLsb, program, chosen.getName());
+        } else {
+            int program = gmProgram == null ? 0 : gmProgram;
+            sendProgram(0, 0, program);
+            currentProgram = new MidiProgram(0, 0, program, "GM Program " + program);
+        }
+        return currentProgram.displayName();
+    }
+
+    /**
+     * Exposes the primary melodic channel so callers can perform advanced control changes if
+     * needed. Channel 9/10 is intentionally avoided to steer clear of the percussion kit.
+     */
+    public synchronized MidiChannel channel() {
+        ensureSynthReady();
+        return primaryChannel;
     }
 
     public synchronized Synthesizer getSynthesizer() {
@@ -120,6 +162,14 @@ public class MidiService {
 
     public synchronized String getCurrentSoundFontPath() {
         return currentSoundFontPath;
+    }
+
+    public synchronized List<String> getInstrumentNames() {
+        return List.copyOf(instrumentNames);
+    }
+
+    public synchronized MidiProgram getCurrentProgram() {
+        return currentProgram;
     }
 
     public synchronized void shutdown() {
@@ -134,6 +184,12 @@ public class MidiService {
         synthesizer = null;
         customSoundbank = null;
         currentSoundFontPath = null;
+        availableInstruments = new Instrument[0];
+        instrumentNames.clear();
+        currentProgram = MidiProgram.gmPiano();
+        defaultBankLoaded = false;
+        defaultSoundbank = null;
+        primaryChannel = null;
     }
 
     private void publishNoteOn(int note, int velocity, long nanoTime) {
@@ -160,7 +216,7 @@ public class MidiService {
         }
     }
 
-    private void applySoundFont(String soundFontPath) throws InvalidMidiDataException, IOException {
+    private void applySoundFont(String soundFontPath) throws Exception {
         if (synthesizer == null) {
             return;
         }
@@ -170,6 +226,9 @@ public class MidiService {
             }
             customSoundbank = null;
             currentSoundFontPath = null;
+            if (defaultSoundbank != null && !defaultBankLoaded) {
+                defaultBankLoaded = synthesizer.loadAllInstruments(defaultSoundbank);
+            }
             return;
         }
         File file = new File(soundFontPath);
@@ -180,38 +239,136 @@ public class MidiService {
         if (soundbank == null) {
             throw new IOException("Unsupported SoundFont: " + file.getAbsolutePath());
         }
-        Soundbank previous = customSoundbank;
+        Soundbank previousCustom = customSoundbank;
         String previousPath = currentSoundFontPath;
-        if (previous != null) {
-            synthesizer.unloadAllInstruments(previous);
+        boolean wasDefaultLoaded = defaultBankLoaded;
+        if (previousCustom != null) {
+            synthesizer.unloadAllInstruments(previousCustom);
         }
-        boolean loaded;
+        if (defaultBankLoaded && defaultSoundbank != null) {
+            synthesizer.unloadAllInstruments(defaultSoundbank);
+            defaultBankLoaded = false;
+        }
         try {
-            loaded = synthesizer.loadAllInstruments(soundbank);
-        } catch (RuntimeException ex) {
-            if (previous != null) {
-                synthesizer.loadAllInstruments(previous);
-                customSoundbank = previous;
-                currentSoundFontPath = previousPath;
-            } else {
-                customSoundbank = null;
-                currentSoundFontPath = null;
+            if (!synthesizer.loadAllInstruments(soundbank)) {
+                throw new IOException("Unable to load SoundFont: " + file.getAbsolutePath());
             }
+        } catch (RuntimeException | IOException ex) {
+            restorePreviousBanks(previousCustom, previousPath, wasDefaultLoaded);
             throw ex;
-        }
-        if (!loaded) {
-            if (previous != null) {
-                synthesizer.loadAllInstruments(previous);
-                customSoundbank = previous;
-                currentSoundFontPath = previousPath;
-            } else {
-                customSoundbank = null;
-                currentSoundFontPath = null;
-            }
-            throw new IOException("Unable to load SoundFont: " + file.getAbsolutePath());
         }
         customSoundbank = soundbank;
         currentSoundFontPath = soundFontPath;
+    }
+
+    private void restorePreviousBanks(Soundbank previousCustom, String previousPath, boolean wasDefaultLoaded) {
+        if (previousCustom != null) {
+            synthesizer.loadAllInstruments(previousCustom);
+            customSoundbank = previousCustom;
+            currentSoundFontPath = previousPath;
+            defaultBankLoaded = false;
+        } else if (defaultSoundbank != null && wasDefaultLoaded) {
+            defaultBankLoaded = synthesizer.loadAllInstruments(defaultSoundbank);
+            customSoundbank = null;
+            currentSoundFontPath = null;
+        } else {
+            defaultBankLoaded = wasDefaultLoaded;
+        }
+    }
+
+    private void refreshInstruments() {
+        if (synthesizer == null) {
+            availableInstruments = new Instrument[0];
+            instrumentNames.clear();
+            return;
+        }
+        availableInstruments = synthesizer.getAvailableInstruments();
+        instrumentNames.clear();
+        for (Instrument instrument : availableInstruments) {
+            instrumentNames.add(instrument.getName());
+        }
+    }
+
+    private Instrument findInstrument(String preferName) {
+        // Adjust the keywords below if a different default patch should be favoured.
+        if (availableInstruments == null || availableInstruments.length == 0) {
+            return null;
+        }
+        if (preferName != null && !preferName.isBlank()) {
+            Instrument match = findByTokens(preferName);
+            if (match != null) {
+                return match;
+            }
+        }
+        Instrument grand = findByTokens("grand");
+        if (grand != null) {
+            return grand;
+        }
+        return findByTokens("piano");
+    }
+
+    private Instrument findByTokens(String phrase) {
+        if (phrase == null || phrase.isBlank() || availableInstruments == null) {
+            return null;
+        }
+        String[] tokens = phrase.toLowerCase().split("\\s+");
+        Instrument loose = null;
+        for (Instrument instrument : availableInstruments) {
+            String name = instrument.getName();
+            String lower = name.toLowerCase();
+            boolean allMatch = true;
+            for (String token : tokens) {
+                if (!lower.contains(token)) {
+                    allMatch = false;
+                    break;
+                }
+            }
+            if (allMatch) {
+                return instrument;
+            }
+            if (loose == null) {
+                for (String token : tokens) {
+                    if (!token.isBlank() && lower.contains(token)) {
+                        loose = instrument;
+                        break;
+                    }
+                }
+            }
+        }
+        return loose;
+    }
+
+    private void sendProgram(int bankMsb, int bankLsb, int program) {
+        if (primaryChannel == null) {
+            return;
+        }
+        primaryChannel.controlChange(0, clamp7bit(bankMsb));
+        primaryChannel.controlChange(32, clamp7bit(bankLsb));
+        primaryChannel.programChange(clamp7bit(program));
+    }
+
+    private void ensureSynthReady() {
+        if (synthesizer == null) {
+            throw new IllegalStateException("Synthesizer not initialised");
+        }
+    }
+
+    private int clamp7bit(int value) {
+        if (value < 0) {
+            return 0;
+        }
+        if (value > 127) {
+            return 127;
+        }
+        return value;
+    }
+
+    private String normalize(String path) {
+        if (path == null) {
+            return null;
+        }
+        String trimmed = path.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 
     private void sendToSynth(MidiMessage message) {
@@ -288,5 +445,14 @@ public class MidiService {
         void onSustain(boolean sustainOn, long timestampNanos);
 
         void onTempoChange(int microsecondsPerQuarterNote, long timestampNanos);
+    }
+
+    /**
+     * Simple record of the currently active patch so both live playback and replays stay in sync.
+     */
+    public record MidiProgram(int bankMsb, int bankLsb, int program, String displayName) {
+        private static MidiProgram gmPiano() {
+            return new MidiProgram(0, 0, 0, "GM Program 0");
+        }
     }
 }

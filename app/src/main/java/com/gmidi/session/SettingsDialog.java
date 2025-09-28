@@ -1,5 +1,6 @@
 package com.gmidi.session;
 
+import com.gmidi.ui.KeyFallCanvas.VelCurve;
 import com.gmidi.video.FfmpegLocator;
 import com.gmidi.video.VideoSettings;
 import javafx.application.Platform;
@@ -26,6 +27,7 @@ import java.io.InputStreamReader;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -40,7 +42,12 @@ public class SettingsDialog extends Dialog<SettingsDialog.Result> {
 
     private final AtomicLong ffmpegProbeCounter = new AtomicLong();
 
-    public SettingsDialog(VideoSettings current, String currentSoundFont, Node owner) {
+    public SettingsDialog(VideoSettings current,
+                         String currentSoundFont,
+                         List<String> instrumentNames,
+                         String currentInstrument,
+                         VelCurve currentCurve,
+                         Node owner) {
         setTitle("Recorder Settings");
         getDialogPane().getButtonTypes().addAll(ButtonType.CANCEL, ButtonType.OK);
         getDialogPane().getStyleClass().add("settings-dialog");
@@ -123,6 +130,27 @@ public class SettingsDialog extends Dialog<SettingsDialog.Result> {
                 soundFontField.setText(chosen.getAbsolutePath());
             }
         });
+
+        List<String> safeNames = instrumentNames == null ? List.of() : instrumentNames;
+        ObservableList<String> instrumentOptions = FXCollections.observableArrayList(safeNames);
+        if (currentInstrument != null && !currentInstrument.isBlank()
+                && instrumentOptions.stream().noneMatch(name -> name.equalsIgnoreCase(currentInstrument))) {
+            instrumentOptions.add(0, currentInstrument);
+        }
+        ChoiceBox<String> instrumentChoice = new ChoiceBox<>(instrumentOptions);
+        if (!instrumentOptions.isEmpty()) {
+            instrumentChoice.setValue(instrumentOptions.stream()
+                    .filter(name -> name.equalsIgnoreCase(currentInstrument))
+                    .findFirst()
+                    .orElse(instrumentOptions.get(0)));
+        } else {
+            instrumentChoice.setDisable(true);
+        }
+
+        ObservableList<VelCurve> curveOptions = FXCollections.observableArrayList(VelCurve.values());
+        ChoiceBox<VelCurve> velocityChoice = new ChoiceBox<>(curveOptions);
+        velocityChoice.setValue(currentCurve == null ? VelCurve.LINEAR : currentCurve);
+
         TextField ffmpegField = new TextField(current.getFfmpegExecutable() == null
                 ? ""
                 : current.getFfmpegExecutable().toString());
@@ -138,8 +166,10 @@ public class SettingsDialog extends Dialog<SettingsDialog.Result> {
         grid.addRow(4, new Label("CRF"), crfField);
         grid.addRow(5, new Label("SoundFont"), soundFontField, soundFontBrowse);
         GridPane.setHgrow(soundFontField, Priority.ALWAYS);
-        grid.addRow(6, new Label("FFmpeg path"), ffmpegField);
-        grid.add(ffmpegStatus, 1, 7, 2, 1);
+        grid.addRow(6, new Label("Instrument"), instrumentChoice);
+        grid.addRow(7, new Label("Velocity curve"), velocityChoice);
+        grid.addRow(8, new Label("FFmpeg path"), ffmpegField);
+        grid.add(ffmpegStatus, 1, 9, 2, 1);
 
         getDialogPane().setContent(grid);
 
@@ -180,17 +210,23 @@ public class SettingsDialog extends Dialog<SettingsDialog.Result> {
             }
             String soundFontText = soundFontField.getText().trim();
             String resolvedSoundFont = soundFontText.isEmpty() ? null : soundFontText;
-            return new Result(updated, resolvedSoundFont);
+            String chosenInstrument = instrumentChoice.isDisabled() ? null : instrumentChoice.getValue();
+            VelCurve chosenCurve = velocityChoice.getValue() == null ? VelCurve.LINEAR : velocityChoice.getValue();
+            return new Result(updated, resolvedSoundFont, chosenInstrument, chosenCurve);
         });
     }
 
     public static final class Result {
         private final VideoSettings videoSettings;
         private final String soundFontPath;
+        private final String instrumentName;
+        private final VelCurve velocityCurve;
 
-        Result(VideoSettings videoSettings, String soundFontPath) {
+        Result(VideoSettings videoSettings, String soundFontPath, String instrumentName, VelCurve velocityCurve) {
             this.videoSettings = videoSettings;
             this.soundFontPath = soundFontPath;
+            this.instrumentName = instrumentName;
+            this.velocityCurve = velocityCurve;
         }
 
         public VideoSettings videoSettings() {
@@ -199,6 +235,14 @@ public class SettingsDialog extends Dialog<SettingsDialog.Result> {
 
         public Optional<String> soundFontPath() {
             return Optional.ofNullable(soundFontPath);
+        }
+
+        public Optional<String> instrumentName() {
+            return Optional.ofNullable(instrumentName);
+        }
+
+        public VelCurve velocityCurve() {
+            return velocityCurve;
         }
     }
 

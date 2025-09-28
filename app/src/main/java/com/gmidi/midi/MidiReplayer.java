@@ -30,6 +30,8 @@ public final class MidiReplayer implements AutoCloseable {
     private final Transmitter transmitter;
     private final VisualSink visualSink;
 
+    private MidiService.MidiProgram program = new MidiService.MidiProgram(0, 0, 0, "GM Program 0");
+
     private Runnable finishedListener;
 
     /**
@@ -77,13 +79,19 @@ public final class MidiReplayer implements AutoCloseable {
     public void setSequenceFromRecorded(List<MidiRecorder.Event> events, int ppq, float bpm)
             throws InvalidMidiDataException {
         Sequence sequence = new Sequence(Sequence.PPQ, ppq);
-        MidiEventBuilder builder = new MidiEventBuilder(sequence.createTrack());
+        javax.sound.midi.Track track = sequence.createTrack();
+        insertProgramChange(track);
+        MidiEventBuilder builder = new MidiEventBuilder(track);
         for (MidiRecorder.Event event : events) {
             builder.add(event.message(), Math.max(0, event.tick()));
         }
         builder.finish(ppq);
         sequencer.setSequence(sequence);
         sequencer.setTempoInBPM(bpm);
+    }
+
+    public void setProgram(MidiService.MidiProgram program) {
+        this.program = program != null ? program : new MidiService.MidiProgram(0, 0, 0, "GM Program 0");
     }
 
     public void play() {
@@ -157,6 +165,31 @@ public final class MidiReplayer implements AutoCloseable {
         } catch (InvalidMidiDataException ex) {
             // The controller numbers are constant; if construction fails there is nothing we can do.
         }
+    }
+
+    private void insertProgramChange(javax.sound.midi.Track track) throws InvalidMidiDataException {
+        MidiService.MidiProgram patch = program;
+        if (patch == null) {
+            patch = new MidiService.MidiProgram(0, 0, 0, "GM Program 0");
+        }
+        if (patch.bankMsb() != 0 || patch.bankLsb() != 0) {
+            ShortMessage bankMsb = new ShortMessage(ShortMessage.CONTROL_CHANGE, 0, 0, clamp7bit(patch.bankMsb()));
+            track.add(new MidiEvent(bankMsb, 0));
+            ShortMessage bankLsb = new ShortMessage(ShortMessage.CONTROL_CHANGE, 0, 32, clamp7bit(patch.bankLsb()));
+            track.add(new MidiEvent(bankLsb, 0));
+        }
+        ShortMessage pc = new ShortMessage(ShortMessage.PROGRAM_CHANGE, 0, clamp7bit(patch.program()), 0);
+        track.add(new MidiEvent(pc, 0));
+    }
+
+    private int clamp7bit(int value) {
+        if (value < 0) {
+            return 0;
+        }
+        if (value > 127) {
+            return 127;
+        }
+        return value;
     }
 
     private static final class TeeReceiver implements Receiver {

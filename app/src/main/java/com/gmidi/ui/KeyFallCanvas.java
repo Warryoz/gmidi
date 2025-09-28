@@ -14,7 +14,7 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 import java.util.Objects;
-import java.util.function.Consumer;
+import java.util.function.BiConsumer;
 import java.util.function.DoubleConsumer;
 
 /**
@@ -28,8 +28,12 @@ public class KeyFallCanvas extends Canvas {
     private static final double SPAWN_PAD_PX = 24.0;
     private static final double IMPACT_FADE_MS = 160.0;
     private static final double IMPACT_THRESHOLD_PX = 0.0;
-    private static final double NOTE_TRAIL_HEIGHT = 14.0;
     private static final Color NOTE_COLOR = Color.web("#2CE4D0");
+    // Tweak these to adjust how velocity influences the visual trails.
+    private static final double MIN_TRAIL_THICKNESS = 3.0;
+    private static final double MAX_TRAIL_THICKNESS = 12.0;
+    private static final double MIN_TRAIL_ALPHA = 0.25;
+    private static final double MAX_TRAIL_ALPHA = 1.0;
 
     private static final int MIN_W = 640;
     private static final int MIN_H = 360;
@@ -70,7 +74,8 @@ public class KeyFallCanvas extends Canvas {
     private boolean pendingApply;
     private AnimationTimer resizeCoalescer;
 
-    private Consumer<Integer> onImpact;
+    private BiConsumer<Integer, Double> onImpact;
+    private VelCurve velCurve = VelCurve.LINEAR;
 
     public KeyFallCanvas() {
         super(1, 1);
@@ -227,6 +232,11 @@ public class KeyFallCanvas extends Canvas {
         note.spawnNanos = tNanos > 0 ? tNanos : System.nanoTime();
         note.impacted = false;
         note.impactNanos = 0;
+        int clampedVelocity = Math.max(1, Math.min(127, velocity));
+        double mapped = mapVelocity(clampedVelocity);
+        note.trailThickness = lerp(MIN_TRAIL_THICKNESS, MAX_TRAIL_THICKNESS, mapped);
+        note.baseAlpha = lerp(MIN_TRAIL_ALPHA, MAX_TRAIL_ALPHA, mapped);
+        note.intensity = mapped;
         active.add(note);
         requestRender();
     }
@@ -247,8 +257,16 @@ public class KeyFallCanvas extends Canvas {
         requestRender();
     }
 
-    public void setOnImpact(Consumer<Integer> onImpact) {
+    public void setOnImpact(BiConsumer<Integer, Double> onImpact) {
         this.onImpact = onImpact;
+    }
+
+    public void setVelocityCurve(VelCurve curve) {
+        velCurve = curve == null ? VelCurve.LINEAR : curve;
+    }
+
+    public VelCurve getVelocityCurve() {
+        return velCurve;
     }
 
     /**
@@ -276,7 +294,7 @@ public class KeyFallCanvas extends Canvas {
                 note.impacted = true;
                 note.impactNanos = nowNanos;
                 if (onImpact != null) {
-                    onImpact.accept(note.midi);
+                    onImpact.accept(note.midi, note.intensity);
                 }
                 y = keyboardLine;
             }
@@ -334,8 +352,13 @@ public class KeyFallCanvas extends Canvas {
                 continue;
             }
 
-            g.setGlobalAlpha(alpha);
-            g.fillRoundRect(note.x, y - NOTE_TRAIL_HEIGHT, note.w, NOTE_TRAIL_HEIGHT, 6, 6);
+            double appliedAlpha = alpha * note.baseAlpha;
+            if (appliedAlpha <= 0.0) {
+                continue;
+            }
+            g.setGlobalAlpha(appliedAlpha);
+            double thickness = note.trailThickness;
+            g.fillRoundRect(note.x, y - thickness, note.w, thickness, 6, 6);
         }
         g.setGlobalAlpha(1.0);
         g.restore();
@@ -375,5 +398,27 @@ public class KeyFallCanvas extends Canvas {
         long spawnNanos;
         boolean impacted;
         long impactNanos;
+        double trailThickness;
+        double baseAlpha;
+        double intensity;
+    }
+
+    public enum VelCurve {
+        LINEAR,
+        SOFT,
+        HARD // Add more entries here to experiment with custom curves.
+    }
+
+    private double mapVelocity(int velocity) {
+        double x = clamp(velocity, 1, 127) / 127.0;
+        return switch (velCurve) {
+            case SOFT -> Math.sqrt(x);
+            case HARD -> x * x;
+            default -> x;
+        };
+    }
+
+    private double lerp(double min, double max, double t) {
+        return min + (max - min) * clamp(t, 0.0, 1.0);
     }
 }
