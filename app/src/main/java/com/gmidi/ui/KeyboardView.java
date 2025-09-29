@@ -11,6 +11,7 @@ import javafx.scene.paint.Color;
 import javafx.util.Duration;
 
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.Map;
 
 /**
@@ -43,6 +44,7 @@ public class KeyboardView extends Region {
     private final Map<Integer, Tooltip> tooltips = new HashMap<>();
     private Tooltip activeTooltip;
     private boolean flashActiveDuringDraw;
+    private final Map<Integer, Long> keyReleaseMicros = new HashMap<>();
 
     public KeyboardView() {
         getStyleClass().add("keyboard-view");
@@ -62,16 +64,53 @@ public class KeyboardView extends Region {
         if (midiNote < 0 || midiNote >= pressed.length) {
             return;
         }
-        pressed[midiNote] = true;
-        redraw();
+        keyReleaseMicros.remove(midiNote);
+        if (markDown(midiNote)) {
+            redraw();
+        }
     }
 
     public void release(int midiNote) {
         if (midiNote < 0 || midiNote >= pressed.length) {
             return;
         }
-        pressed[midiNote] = false;
+        keyReleaseMicros.remove(midiNote);
+        if (markUp(midiNote)) {
+            redraw();
+        }
+    }
+
+    public void keyDownUntil(int midiNote, long releaseMicros) {
+        if (midiNote < 0 || midiNote >= pressed.length) {
+            return;
+        }
+        markDown(midiNote);
+        if (releaseMicros > 0) {
+            keyReleaseMicros.merge(midiNote, releaseMicros, Math::max);
+        } else {
+            keyReleaseMicros.remove(midiNote);
+        }
         redraw();
+    }
+
+    public void tickMicros(long nowMicros) {
+        if (keyReleaseMicros.isEmpty()) {
+            return;
+        }
+        boolean changed = false;
+        Iterator<Map.Entry<Integer, Long>> it = keyReleaseMicros.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<Integer, Long> entry = it.next();
+            if (nowMicros >= entry.getValue()) {
+                it.remove();
+                if (markUp(entry.getKey())) {
+                    changed = true;
+                }
+            }
+        }
+        if (changed) {
+            redraw();
+        }
     }
 
     public void flash(int midiNote, double intensity) {
@@ -245,5 +284,21 @@ public class KeyboardView extends Region {
             return MAX_HEIGHT;
         }
         return desired;
+    }
+
+    private boolean markDown(int midiNote) {
+        if (!pressed[midiNote]) {
+            pressed[midiNote] = true;
+            return true;
+        }
+        return false;
+    }
+
+    private boolean markUp(int midiNote) {
+        if (pressed[midiNote]) {
+            pressed[midiNote] = false;
+            return true;
+        }
+        return false;
     }
 }
