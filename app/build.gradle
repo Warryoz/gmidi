@@ -39,7 +39,7 @@ application {
     mainModule = 'com.gmidi'
     mainClass  = 'com.gmidi.MainApp'
     applicationDefaultJvmArgs = prismVerboseEnabled.map { enabled ->
-        def args = ['-Dprism.allowhidpi=false']
+        def args = ['-Dprism.allowhidpi=false', '--add-exports=java.desktop/com.sun.media.sound=ALL-UNNAMED']
         if (enabled) {
             args << '-Dprism.verbose=true'
         }
@@ -49,6 +49,7 @@ application {
 
 tasks.withType(JavaExec).configureEach {
     modularity.inferModulePath = true
+    jvmArgs '--add-exports=java.desktop/com.sun.media.sound=ALL-UNNAMED'
 }
 
 tasks.withType(Test).configureEach {

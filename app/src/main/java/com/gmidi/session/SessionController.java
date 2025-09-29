@@ -472,13 +472,16 @@ public class SessionController {
 
             @Override
             public void noteOn(int midi, int velocity, long tNanos) {
-                keyboardView.press(midi);
             }
 
             @Override
             public void noteOff(int midi, long tNanos) {
                 keyFallCanvas.onNoteOff(midi, tNanos);
-                keyboardView.release(midi);
+            }
+
+            @Override
+            public void keyDownUntil(int midi, long releaseMicros) {
+                keyboardView.keyDownUntil(midi, releaseMicros);
             }
         }, synthesizer, midiService::getTranspose, midiService.getVelocityMap());
         replayer.setOnFinished(this::onPlaybackFinished);
@@ -1328,6 +1331,14 @@ public class SessionController {
 
                     updateMessage("Muxing…");
                     updateProgress(0.99, 1.0);
+                    long audioSize = Files.exists(audioFile) ? Files.size(audioFile) : 0L;
+                    long videoSize = Files.exists(videoFile) ? Files.size(videoFile) : 0L;
+                    if (audioSize <= 0) {
+                        throw new IOException("No audio rendered. Java SoftSynth not accessible. Run with --add-exports=java.desktop/com.sun.media.sound=ALL-UNNAMED or install an external renderer.");
+                    }
+                    if (videoSize <= 0) {
+                        throw new IOException("No video frames rendered; aborting mux.");
+                    }
                     new VideoRecorder().muxWithAudio(videoFile, audioFile, options.output(), videoSettings);
                     updateProgress(1.0, 1.0);
                     updateMessage("Done");
@@ -1510,49 +1521,47 @@ public class SessionController {
     }
 
     private List<MidiReplayer.VisualNote> buildVisualNotes(Sequence sequence, VelocityMap velocityMap) {
-        List<MidiReplayer.VisualNote> raw = MidiReplayer.MidiTimebase.extractNotesWithMicros(sequence);
-        if (raw.isEmpty()) {
-            return raw;
+        try {
+            List<MidiReplayer.VisualNote> raw = MidiReplayer.collectVisualNotes(sequence);
+            if (raw.isEmpty()) {
+                return raw;
+            }
+            List<MidiReplayer.VisualNote> mapped = new ArrayList<>(raw.size());
+            for (MidiReplayer.VisualNote note : raw) {
+                int midi = Math.max(0, Math.min(127, note.key()));
+                int velocity = velocityMap != null ? velocityMap.map(note.velocity()) : note.velocity();
+                long onMicros = Math.max(0L, note.onMicros());
+                long releaseMicros = Math.max(onMicros, note.releaseMicros());
+                mapped.add(new MidiReplayer.VisualNote(
+                        midi,
+                        note.channel(),
+                        onMicros,
+                        releaseMicros,
+                        Math.max(0, Math.min(127, velocity))));
+            }
+            mapped.sort(Comparator.comparingLong(MidiReplayer.VisualNote::onMicros));
+            return mapped;
+        } catch (Exception ex) {
+            throw new IllegalStateException("Failed to prepare visual notes", ex);
         }
-        List<MidiReplayer.VisualNote> mapped = new ArrayList<>(raw.size());
-        for (MidiReplayer.VisualNote note : raw) {
-            int midi = Math.max(0, Math.min(127, note.midi()));
-            int velocity = velocityMap != null ? velocityMap.map(note.velocity()) : note.velocity();
-            long onMicros = Math.max(0L, note.onMicros());
-            long offMicros = Math.max(onMicros, note.offMicros());
-            mapped.add(new MidiReplayer.VisualNote(
-                    note.channel(),
-                    midi,
-                    Math.max(0, Math.min(127, velocity)),
-                    onMicros,
-                    offMicros));
-        }
-        mapped.sort(Comparator.comparingLong(MidiReplayer.VisualNote::onMicros));
-        return mapped;
     }
 
     private final class FrameRenderer {
         private final List<MidiReplayer.VisualNote> notes;
         private final long travelMicros;
-        private final List<MidiReplayer.VisualNote> releaseOrder;
         private int nextSpawn;
-        private int nextPress;
-        private int nextRelease;
+        private int nextImpact;
 
         FrameRenderer(List<MidiReplayer.VisualNote> notes, long travelMicros) {
             this.notes = notes;
             this.travelMicros = Math.max(1L, travelMicros);
-            this.releaseOrder = new ArrayList<>(notes);
-            this.releaseOrder.sort(Comparator.comparingLong(MidiReplayer.VisualNote::offMicros)
-                    .thenComparingLong(MidiReplayer.VisualNote::onMicros));
         }
 
         void reset() {
             keyFallCanvas.clear();
             releaseAllKeys();
             nextSpawn = 0;
-            nextPress = 0;
-            nextRelease = 0;
+            nextImpact = 0;
         }
 
         void advanceTo(long micros) {
@@ -1564,21 +1573,18 @@ public class SessionController {
                 }
                 nextSpawn++;
                 keyFallCanvas.spawnScheduled(
-                        note.midi(),
+                        note.key(),
                         note.velocity(),
                         spawnMicros,
                         note.onMicros(),
-                        Math.max(note.onMicros(), note.offMicros()));
+                        note.releaseMicros());
             }
-            while (nextPress < notes.size() && notes.get(nextPress).onMicros() <= micros) {
-                keyboardView.press(notes.get(nextPress).midi());
-                nextPress++;
+            while (nextImpact < notes.size() && notes.get(nextImpact).onMicros() <= micros) {
+                MidiReplayer.VisualNote note = notes.get(nextImpact);
+                keyboardView.keyDownUntil(note.key(), note.releaseMicros());
+                nextImpact++;
             }
-            while (nextRelease < releaseOrder.size()
-                    && releaseOrder.get(nextRelease).offMicros() <= micros) {
-                keyboardView.release(releaseOrder.get(nextRelease).midi());
-                nextRelease++;
-            }
+            keyboardView.tickMicros(micros);
         }
     }
 
@@ -1660,7 +1666,9 @@ public class SessionController {
         if (midiReplayer != null) {
             midiReplayer.pumpVisuals(keyFallCanvas.getTravelMicros());
         }
-        keyFallCanvas.tickMicros(ensureClock().nowMicros());
+        long nowMicros = ensureClock().nowMicros();
+        keyFallCanvas.tickMicros(nowMicros);
+        keyboardView.tickMicros(nowMicros);
         updateFps(now);
         updateElapsed(now);
         if (videoRecorder != null && videoRecorder.isRunning()) {

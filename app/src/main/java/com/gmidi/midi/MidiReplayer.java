@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.IntSupplier;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Replays recorded MIDI events through a shared {@link Sequencer}. Events are mirrored to both the
@@ -48,6 +49,7 @@ public final class MidiReplayer implements AutoCloseable {
     private List<VisualNote> visualNotes = List.of();
     private int nextVisualIndex;
     private long lastVisualMicros = Long.MIN_VALUE;
+    private final Map<NoteKey, Long> pendingReleases = new ConcurrentHashMap<>();
 
     private MidiService.ReverbPreset reverbPreset = MidiService.ReverbPreset.ROOM;
 
@@ -66,6 +68,9 @@ public final class MidiReplayer implements AutoCloseable {
                                  long spawnMicros,
                                  long impactMicros,
                                  long releaseMicros) {
+        }
+
+        default void keyDownUntil(int midi, long releaseMicros) {
         }
     }
 
@@ -226,7 +231,7 @@ public final class MidiReplayer implements AutoCloseable {
                 break;
             }
             nextVisualIndex++;
-            int midi = note.midi;
+            int midi = note.key;
             if (note.channel != 9) {
                 midi = clamp7bit(midi + transposeSupplier.getAsInt());
             }
@@ -234,8 +239,9 @@ public final class MidiReplayer implements AutoCloseable {
                 continue;
             }
             int velocity = velocityMap.map(note.velocity);
-            long release = Math.max(note.onMicros, note.offMicros);
+            long release = Math.max(note.onMicros, note.releaseMicros);
             visualSink.spawnVisual(midi, velocity, spawnMicros, note.onMicros, release);
+            pendingReleases.put(new NoteKey(note.channel, midi), release);
         }
     }
 
@@ -268,12 +274,22 @@ public final class MidiReplayer implements AutoCloseable {
     private void handleVisualMessage(MidiMessage message) {
         if (message instanceof ShortMessage shortMessage) {
             int command = shortMessage.getCommand();
+            int channel = shortMessage.getChannel();
             int midi = shortMessage.getData1();
             int velocity = shortMessage.getData2();
             long positionMicros = sequencer.getMicrosecondPosition();
             long now = positionMicros >= 0 ? positionMicros * 1_000L : 0L;
             if (command == ShortMessage.NOTE_ON && velocity > 0) {
-                Platform.runLater(() -> visualSink.noteOn(midi, velocity, now));
+                long releaseMicros = Math.max(0L, positionMicros);
+                Long scheduled = pendingReleases.remove(new NoteKey(channel, midi));
+                if (scheduled != null) {
+                    releaseMicros = Math.max(releaseMicros, scheduled);
+                }
+                long finalRelease = releaseMicros;
+                Platform.runLater(() -> {
+                    visualSink.noteOn(midi, velocity, now);
+                    visualSink.keyDownUntil(midi, finalRelease);
+                });
             } else if (command == ShortMessage.NOTE_OFF || (command == ShortMessage.NOTE_ON && velocity == 0)) {
                 Platform.runLater(() -> visualSink.noteOff(midi, now));
             }
@@ -321,13 +337,20 @@ public final class MidiReplayer implements AutoCloseable {
             resetVisualQueue();
             return;
         }
-        visualNotes = MidiTimebase.extractNotesWithMicros(sequence);
+        try {
+            visualNotes = collectVisualNotes(sequence);
+        } catch (Exception ex) {
+            visualNotes = List.of();
+            resetVisualQueue();
+            throw new IllegalStateException("Failed to resolve MIDI note timings", ex);
+        }
         resetVisualQueue();
     }
 
     private void resetVisualQueue() {
         nextVisualIndex = 0;
         lastVisualMicros = Long.MIN_VALUE;
+        pendingReleases.clear();
     }
 
     private static int clamp7bit(int value) {
@@ -370,75 +393,132 @@ public final class MidiReplayer implements AutoCloseable {
         }
     }
 
-    public static final class MidiTimebase {
-        private MidiTimebase() {
+    public static List<VisualNote> collectVisualNotes(Sequence sequence) throws Exception {
+        if (sequence == null) {
+            return List.of();
         }
-
-        public static List<VisualNote> extractNotesWithMicros(Sequence sequence) {
-            if (sequence == null) {
-                return List.of();
-            }
-            List<EventRef> events = new ArrayList<>();
-            for (Track track : sequence.getTracks()) {
-                for (int i = 0; i < track.size(); i++) {
-                    MidiEvent event = track.get(i);
-                    MidiMessage message = event.getMessage();
-                    if (message instanceof ShortMessage shortMessage) {
-                        int command = shortMessage.getCommand();
-                        if (command == ShortMessage.NOTE_ON || command == ShortMessage.NOTE_OFF) {
-                            events.add(new EventRef(event.getTick(), shortMessage));
-                        }
-                    }
+        List<EventRef> events = new ArrayList<>();
+        long order = 0L;
+        for (Track track : sequence.getTracks()) {
+            for (int i = 0; i < track.size(); i++) {
+                MidiEvent event = track.get(i);
+                MidiMessage message = event.getMessage();
+                if (message instanceof ShortMessage shortMessage) {
+                    events.add(new EventRef(event.getTick(), order++, shortMessage));
                 }
             }
-            events.sort(Comparator.comparingLong(EventRef::tick));
-            Map<NoteKey, NoteOn> active = new HashMap<>();
-            List<VisualNote> notes = new ArrayList<>(events.size());
-            try (Sequencer helper = MidiSystem.getSequencer(false)) {
-                helper.open();
-                helper.setSequence(sequence);
-                for (EventRef ref : events) {
-                    helper.setTickPosition(ref.tick());
-                    long micros = Math.max(0L, helper.getMicrosecondPosition());
-                    ShortMessage message = ref.message();
-                    int command = message.getCommand();
-                    int channel = message.getChannel();
-                    int midi = message.getData1();
-                    int velocity = message.getData2();
-                    NoteKey key = new NoteKey(channel, midi);
-                    if (command == ShortMessage.NOTE_ON && velocity > 0) {
-                        active.put(key, new NoteOn(channel, midi, velocity, micros));
-                    } else {
-                        NoteOn on = active.remove(key);
-                        if (on != null) {
-                            long offMicros = Math.max(micros, on.onMicros);
-                            notes.add(new VisualNote(on.channel, on.midi, on.velocity, on.onMicros, offMicros));
-                        }
-                    }
+        }
+        events.sort(Comparator.comparingLong(EventRef::tick).thenComparingLong(EventRef::order));
+        Map<NoteKey, RawNote> active = new HashMap<>();
+        Map<Integer, SustainTracker> sustain = new HashMap<>();
+        List<RawNote> finished = new ArrayList<>();
+        long tailTick = 0L;
+        for (EventRef ref : events) {
+            ShortMessage message = ref.message();
+            int command = message.getCommand();
+            int channel = message.getChannel();
+            int data1 = message.getData1();
+            int data2 = message.getData2();
+            tailTick = Math.max(tailTick, ref.tick());
+            if (command == ShortMessage.NOTE_ON && data2 > 0) {
+                active.put(new NoteKey(channel, data1), new RawNote(channel, data1, data2, ref.tick()));
+                continue;
+            }
+            if (command == ShortMessage.NOTE_OFF || (command == ShortMessage.NOTE_ON && data2 == 0)) {
+                NoteKey key = new NoteKey(channel, data1);
+                RawNote note = active.remove(key);
+                if (note != null) {
+                    note.offTick = Math.max(ref.tick(), note.onTick);
+                    finished.add(note);
                 }
-            } catch (Exception ex) {
-                throw new IllegalStateException("Failed to resolve MIDI note timings", ex);
+                continue;
             }
-            long tailMicros = Math.max(0L, sequence.getMicrosecondLength());
-            for (NoteOn dangling : active.values()) {
-                long offMicros = Math.max(tailMicros, dangling.onMicros);
-                notes.add(new VisualNote(dangling.channel, dangling.midi, dangling.velocity, dangling.onMicros, offMicros));
+            if (command == ShortMessage.CONTROL_CHANGE && data1 == 64) {
+                sustain.computeIfAbsent(channel, ch -> new SustainTracker()).update(ref.tick(), data2);
             }
-            notes.sort(Comparator.comparingLong(VisualNote::onMicros));
-            return notes;
         }
-
-        private record EventRef(long tick, ShortMessage message) {
+        tailTick = Math.max(tailTick, sequence.getTickLength());
+        for (RawNote dangling : active.values()) {
+            dangling.offTick = Math.max(tailTick, dangling.onTick);
+            finished.add(dangling);
         }
-
-        private record NoteKey(int channel, int midi) {
+        for (SustainTracker tracker : sustain.values()) {
+            tracker.closeOpenInterval(tailTick);
         }
+        List<VisualNote> notes = new ArrayList<>(finished.size());
+        try (TickClock clock = new TickClock(sequence)) {
+            for (RawNote note : finished) {
+                SustainTracker tracker = sustain.get(note.channel);
+                long releaseTick = tracker != null
+                        ? tracker.resolveReleaseTick(note.offTick)
+                        : note.offTick;
+                long onMicros = Math.max(0L, clock.microsAt(note.onTick));
+                long releaseMicros = Math.max(onMicros, clock.microsAt(releaseTick));
+                notes.add(new VisualNote(note.key, note.channel, onMicros, releaseMicros, note.velocity));
+            }
+        }
+        notes.sort(Comparator.comparingLong(VisualNote::onMicros));
+        return notes;
+    }
 
-        private record NoteOn(int channel, int midi, int velocity, long onMicros) {
+    public static record VisualNote(int key, int channel, long onMicros, long releaseMicros, int velocity) {
+    }
+
+    private static final class RawNote {
+        final int channel;
+        final int key;
+        final int velocity;
+        final long onTick;
+        long offTick;
+
+        RawNote(int channel, int key, int velocity, long onTick) {
+            this.channel = channel;
+            this.key = key;
+            this.velocity = velocity;
+            this.onTick = onTick;
+            this.offTick = onTick;
         }
     }
 
-    public static record VisualNote(int channel, int midi, int velocity, long onMicros, long offMicros) {
+    private static final class SustainTracker {
+        private final List<Interval> intervals = new ArrayList<>();
+        private long activeStart = Long.MIN_VALUE;
+
+        void update(long tick, int value) {
+            boolean down = value >= 64;
+            if (down) {
+                if (activeStart == Long.MIN_VALUE) {
+                    activeStart = tick;
+                }
+                return;
+            }
+            if (activeStart != Long.MIN_VALUE) {
+                intervals.add(new Interval(activeStart, tick));
+                activeStart = Long.MIN_VALUE;
+            }
+        }
+
+        void closeOpenInterval(long tailTick) {
+            if (activeStart != Long.MIN_VALUE) {
+                intervals.add(new Interval(activeStart, tailTick));
+                activeStart = Long.MIN_VALUE;
+            }
+        }
+
+        long resolveReleaseTick(long offTick) {
+            for (Interval interval : intervals) {
+                if (offTick >= interval.start && offTick < interval.end) {
+                    return Math.max(offTick, interval.end);
+                }
+            }
+            return offTick;
+        }
+    }
+
+    private record Interval(long start, long end) {
+    }
+
+    private record EventRef(long tick, long order, ShortMessage message) {
     }
 
     private static final class VelocityReceiver implements Receiver {
@@ -560,6 +640,33 @@ public final class MidiReplayer implements AutoCloseable {
             MetaMessage end = new MetaMessage();
             end.setMessage(0x2F, new byte[0], 0);
             track.add(new MidiEvent(end, lastTick + ppq));
+        }
+    }
+
+    private record NoteKey(int channel, int midi) {
+    }
+
+    static final class TickClock implements AutoCloseable {
+        private final Sequencer seq;
+
+        TickClock(Sequence sequence) throws Exception {
+            seq = MidiSystem.getSequencer(false);
+            seq.open();
+            seq.setSequence(sequence);
+        }
+
+        long microsAt(long tick) {
+            try {
+                seq.setTickPosition(tick);
+                return seq.getMicrosecondPosition();
+            } catch (Exception ex) {
+                return 0L;
+            }
+        }
+
+        @Override
+        public void close() {
+            seq.close();
         }
     }
 }
