@@ -484,7 +484,9 @@ public class KeyFallCanvas extends Canvas {
         }
         note.key = midi;
         note.velocity = Math.max(0, Math.min(127, velocity));
-        positionForMidi(midi, x -> note.x = x, w -> note.w = w);
+        FallingNote finalNote = note;
+        FallingNote finalNote1 = note;
+        positionForMidi(midi, x -> finalNote.x = x, w -> finalNote1.w = w);
         long travel = getTravelMicros();
         note.impactMicros = Math.max(0L, impactMicros);
         long spawn = Math.min(note.impactMicros, spawnMicros);
