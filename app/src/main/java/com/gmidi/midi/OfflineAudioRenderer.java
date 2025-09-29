@@ -19,14 +19,20 @@ import javax.sound.sampled.AudioInputStream;
 import javax.sound.sampled.AudioSystem;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.lang.reflect.Method;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.LongConsumer;
 
@@ -56,6 +62,7 @@ public final class OfflineAudioRenderer {
                 velocityMap,
                 reverbPreset,
                 customSoundbank,
+                null,
                 outputFile,
                 null,
                 null);
@@ -67,6 +74,7 @@ public final class OfflineAudioRenderer {
                                  VelocityMap velocityMap,
                                  MidiService.ReverbPreset reverbPreset,
                                  Soundbank customSoundbank,
+                                 String soundFontPath,
                                  File outputFile,
                                  LongConsumer progressMicros,
                                  AtomicBoolean cancelFlag) throws Exception {
@@ -79,7 +87,78 @@ public final class OfflineAudioRenderer {
             parent.mkdirs();
         }
 
-        Sequence playable = cloneWithPatchAndTranspose(sequence, program, reverbPreset, transposeSemis);
+        Sequence playable = bakePatchTransposeVelocity(sequence,
+                program,
+                reverbPreset,
+                transposeSemis,
+                velocityMap);
+
+        AudioUnavailableException softFailure = null;
+        try {
+            if (renderWavWithSoftSynth(playable,
+                    customSoundbank,
+                    reverbPreset,
+                    outputFile,
+                    progressMicros,
+                    cancelFlag)) {
+                return outputFile.toPath();
+            }
+        } catch (AudioUnavailableException ex) {
+            softFailure = ex;
+        }
+
+        if (cancelFlag != null && cancelFlag.get()) {
+            throw new InterruptedException("Audio render cancelled");
+        }
+
+        File fluidsynthExe = locateFluidsynth();
+        File soundFontFile = null;
+        if (soundFontPath != null && !soundFontPath.isBlank()) {
+            soundFontFile = new File(soundFontPath);
+        }
+        if (fluidsynthExe != null && soundFontFile != null && soundFontFile.isFile()) {
+            if (renderWavWithFluidsynth(playable,
+                    fluidsynthExe,
+                    soundFontFile,
+                    outputFile,
+                    progressMicros,
+                    cancelFlag)) {
+                return outputFile.toPath();
+            }
+        }
+
+        String baseMessage = "Audio export unavailable: Java SoftSynth couldn't be accessed. "
+                + "Start the app with --add-exports=java.desktop/com.sun.media.sound=ALL-UNNAMED, "
+                + "or install fluidsynth and ensure it's on PATH.";
+        if (softFailure != null && softFailure.getMessage() != null) {
+            baseMessage = softFailure.getMessage();
+        }
+        if (fluidsynthExe == null) {
+            baseMessage += " (fluidsynth not found on PATH)";
+        } else if (soundFontFile == null || !soundFontFile.isFile()) {
+            baseMessage += " (SoundFont required for fluidsynth)";
+        }
+        throw new AudioUnavailableException(baseMessage, softFailure);
+    }
+
+    private static Sequence bakePatchTransposeVelocity(Sequence source,
+                                                        MidiService.MidiProgram program,
+                                                        MidiService.ReverbPreset reverbPreset,
+                                                        int transposeSemis,
+                                                        VelocityMap velocityMap) throws Exception {
+        CloneResult clone = cloneWithTranspose(source, transposeSemis, velocityMap);
+        Sequence prepared = clone.sequence();
+        MidiReplayer.insertPatchAndReverbAtTick0(prepared, program, reverbPreset);
+        addEndOfTrack(prepared, clone.maxTick());
+        return prepared;
+    }
+
+    private static boolean renderWavWithSoftSynth(Sequence playable,
+                                                  Soundbank customSoundbank,
+                                                  MidiService.ReverbPreset reverbPreset,
+                                                  File outputFile,
+                                                  LongConsumer progressMicros,
+                                                  AtomicBoolean cancelFlag) throws Exception {
         AudioFormat format = new AudioFormat(44_100f, 16, 2, true, false);
         SoftAudio soft = openSoftSynth(format);
         ExecutorService writerExecutor = Executors.newSingleThreadExecutor(r -> {
@@ -89,7 +168,6 @@ public final class OfflineAudioRenderer {
         });
         Sequencer sequencer = null;
         Transmitter transmitter = null;
-        VelocityReceiver velocityReceiver = null;
         Future<?> writerTask = null;
         try {
             if (customSoundbank != null) {
@@ -104,8 +182,7 @@ public final class OfflineAudioRenderer {
             sequencer = MidiSystem.getSequencer(false);
             sequencer.open();
             transmitter = sequencer.getTransmitter();
-            velocityReceiver = new VelocityReceiver(soft.receiver, velocityMap);
-            transmitter.setReceiver(velocityReceiver);
+            transmitter.setReceiver(soft.receiver);
             sequencer.setSequence(playable);
             sequencer.setTickPosition(0);
 
@@ -124,7 +201,7 @@ public final class OfflineAudioRenderer {
                 if (progressMicros != null) {
                     progressMicros.accept(Math.max(0L, sequencer.getMicrosecondPosition()));
                 }
-                Thread.sleep(40L);
+                Thread.sleep(30L);
             }
             if (progressMicros != null) {
                 progressMicros.accept(totalMicros);
@@ -139,18 +216,8 @@ public final class OfflineAudioRenderer {
                 writerTask.get();
             }
             writerExecutor.shutdown();
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-            throw ex;
+            return outputFile.isFile() && outputFile.length() > 0L;
         } finally {
-            if (velocityReceiver != null) {
-                velocityReceiver.close();
-            } else {
-                try {
-                    soft.receiver.close();
-                } catch (Exception ignored) {
-                }
-            }
             if (transmitter != null) {
                 transmitter.close();
             }
@@ -163,11 +230,94 @@ public final class OfflineAudioRenderer {
             } catch (IOException ignored) {
             }
             try {
+                soft.receiver.close();
+            } catch (Exception ignored) {
+            }
+            try {
                 soft.synth.close();
             } catch (Exception ignored) {
             }
         }
-        return outputFile.toPath();
+    }
+
+    private static boolean renderWavWithFluidsynth(Sequence playable,
+                                                   File fluidsynthExe,
+                                                   File soundFont,
+                                                   File outputFile,
+                                                   LongConsumer progressMicros,
+                                                   AtomicBoolean cancelFlag) throws Exception {
+        if (fluidsynthExe == null || soundFont == null || !soundFont.isFile()) {
+            return false;
+        }
+        Path tempMidi = Files.createTempFile("gmidi-render", ".mid");
+        try {
+            MidiSystem.write(playable, 1, tempMidi.toFile());
+            List<String> command = new ArrayList<>();
+            command.add(fluidsynthExe.getAbsolutePath());
+            command.add("-ni");
+            command.add(soundFont.getAbsolutePath());
+            command.add(tempMidi.toAbsolutePath().toString());
+            command.add("-F");
+            command.add(outputFile.getAbsolutePath());
+            command.add("-r");
+            command.add("44100");
+            Process process = new ProcessBuilder(command)
+                    .redirectErrorStream(true)
+                    .start();
+            Thread drain = new Thread(() -> {
+                try (InputStream in = process.getInputStream()) {
+                    in.transferTo(OutputStream.nullOutputStream());
+                } catch (IOException ignored) {
+                }
+            }, "gmidi-fluidsynth-log");
+            drain.setDaemon(true);
+            drain.start();
+            while (true) {
+                if (process.waitFor(200, TimeUnit.MILLISECONDS)) {
+                    break;
+                }
+                if (cancelFlag != null && cancelFlag.get()) {
+                    process.destroyForcibly();
+                    drain.join();
+                    throw new InterruptedException("Audio render cancelled");
+                }
+            }
+            drain.join();
+            int exit = process.exitValue();
+            if (exit != 0) {
+                return false;
+            }
+            if (progressMicros != null) {
+                progressMicros.accept(Math.max(0L, playable.getMicrosecondLength()));
+            }
+            return outputFile.isFile() && outputFile.length() > 0L;
+        } finally {
+            Files.deleteIfExists(tempMidi);
+        }
+    }
+
+    private static File locateFluidsynth() {
+        String exe = isWindows() ? "fluidsynth.exe" : "fluidsynth";
+        String path = System.getenv("PATH");
+        if (path == null || path.isBlank()) {
+            return null;
+        }
+        String[] entries = path.split(File.pathSeparator);
+        for (String entry : entries) {
+            if (entry == null || entry.isBlank()) {
+                continue;
+            }
+            File candidate = new File(entry, exe);
+            if (candidate.isFile() && candidate.canExecute()) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private static boolean isWindows() {
+        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        return os.contains("win");
     }
 
     private static SoftAudio openSoftSynth(AudioFormat format) throws Exception {
@@ -180,14 +330,18 @@ public final class OfflineAudioRenderer {
             Receiver receiver = synth.getReceiver();
             return new SoftAudio(synth, receiver, stream);
         } catch (ReflectiveOperationException ex) {
-            throw new IOException("Java SoftSynth not accessible. Run with --add-exports=java.desktop/com.sun.media.sound=ALL-UNNAMED or install an external renderer.", ex);
+            throw new AudioUnavailableException(
+                    "Audio export unavailable: Java SoftSynth couldn't be accessed. "
+                            + "Start the app with --add-exports=java.desktop/com.sun.media.sound=ALL-UNNAMED, "
+                            + "or install fluidsynth and ensure it's on PATH.",
+                    ex);
         }
     }
 
     private static Sequence cloneWithPatchAndTranspose(Sequence source,
-                                                       MidiService.MidiProgram program,
-                                                       MidiService.ReverbPreset reverbPreset,
-                                                       int transposeSemis) throws Exception {
+                                                        MidiService.MidiProgram program,
+                                                        MidiService.ReverbPreset reverbPreset,
+                                                        int transposeSemis) throws Exception {
         CloneResult clone = cloneWithTranspose(source, transposeSemis);
         Sequence prepared = clone.sequence();
         MidiReplayer.insertPatchAndReverbAtTick0(prepared, program, reverbPreset);
@@ -196,6 +350,12 @@ public final class OfflineAudioRenderer {
     }
 
     private static CloneResult cloneWithTranspose(Sequence source, int semis) throws Exception {
+        return cloneWithTranspose(source, semis, null);
+    }
+
+    private static CloneResult cloneWithTranspose(Sequence source,
+                                                  int semis,
+                                                  VelocityMap velocityMap) throws Exception {
         if (source == null) {
             throw new IllegalArgumentException("source sequence null");
         }
@@ -211,7 +371,7 @@ public final class OfflineAudioRenderer {
             javax.sound.midi.Track dst = dstTracks.get(i);
             for (int j = 0; j < src.size(); j++) {
                 MidiEvent event = src.get(j);
-                MidiMessage copy = cloneWithTranspose(event.getMessage(), semis);
+                MidiMessage copy = cloneForPlayback(event.getMessage(), semis, velocityMap);
                 dst.add(new MidiEvent(copy, event.getTick()));
                 maxTick = Math.max(maxTick, event.getTick());
             }
@@ -222,23 +382,35 @@ public final class OfflineAudioRenderer {
         return new CloneResult(clone, maxTick);
     }
 
-    private static MidiMessage cloneWithTranspose(MidiMessage message, int semis) {
+    private static MidiMessage cloneForPlayback(MidiMessage message,
+                                                int semis,
+                                                VelocityMap velocityMap) {
         if (!(message instanceof ShortMessage shortMessage)) {
             return (MidiMessage) message.clone();
         }
         int command = shortMessage.getCommand();
+        int channel = shortMessage.getChannel();
+        int data1 = shortMessage.getData1();
+        int data2 = shortMessage.getData2();
+        int note = data1;
         if ((command == ShortMessage.NOTE_ON || command == ShortMessage.NOTE_OFF)
-                && shortMessage.getChannel() != 9 && semis != 0) {
-            int note = clamp7bit(shortMessage.getData1() + semis);
-            int velocity = shortMessage.getData2();
-            try {
-                ShortMessage shifted = new ShortMessage();
-                shifted.setMessage(command, shortMessage.getChannel(), note, velocity);
-                return shifted;
-            } catch (InvalidMidiDataException ignored) {
-            }
+                && channel != 9 && semis != 0) {
+            note = clamp7bit(data1 + semis);
         }
-        return (MidiMessage) message.clone();
+        int velocity = data2;
+        if (velocityMap != null && command == ShortMessage.NOTE_ON && velocity > 0) {
+            velocity = clamp7bit(velocityMap.map(velocity));
+        }
+        if (note == data1 && velocity == data2) {
+            return (MidiMessage) shortMessage.clone();
+        }
+        try {
+            ShortMessage clone = new ShortMessage();
+            clone.setMessage(command, channel, note, velocity);
+            return clone;
+        } catch (InvalidMidiDataException ex) {
+            return (MidiMessage) shortMessage.clone();
+        }
     }
 
     private static void addEndOfTrack(Sequence sequence, long maxTick) throws InvalidMidiDataException {
@@ -286,44 +458,13 @@ public final class OfflineAudioRenderer {
         }
     }
 
-    private static final class VelocityReceiver implements Receiver {
-        private final Receiver out;
-        private final VelocityMap velocityMap;
-
-        private VelocityReceiver(Receiver out, VelocityMap velocityMap) {
-            this.out = out;
-            this.velocityMap = velocityMap;
+    public static class AudioUnavailableException extends IOException {
+        public AudioUnavailableException(String message) {
+            super(message);
         }
 
-        @Override
-        public void send(MidiMessage message, long timeStamp) {
-            if (message instanceof ShortMessage shortMessage) {
-                int command = shortMessage.getCommand();
-                if (command == ShortMessage.NOTE_ON) {
-                    int velocity = shortMessage.getData2();
-                    if (velocity > 0) {
-                        int mapped = velocityMap.map(velocity);
-                        if (mapped != velocity) {
-                            try {
-                                ShortMessage remapped = new ShortMessage();
-                                remapped.setMessage(ShortMessage.NOTE_ON,
-                                        shortMessage.getChannel(),
-                                        shortMessage.getData1(),
-                                        mapped);
-                                out.send(remapped, timeStamp);
-                                return;
-                            } catch (InvalidMidiDataException ignored) {
-                            }
-                        }
-                    }
-                }
-            }
-            out.send(message, timeStamp);
-        }
-
-        @Override
-        public void close() {
-            out.close();
+        public AudioUnavailableException(String message, Throwable cause) {
+            super(message, cause);
         }
     }
 }
