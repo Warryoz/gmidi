@@ -483,6 +483,16 @@ public class SessionController {
             public void keyDownUntil(int midi, long releaseMicros) {
                 keyboardView.keyDownUntil(midi, releaseMicros);
             }
+
+            @Override
+            public void noteOnFallback(int midi, int velocity, long tNanos) {
+                keyboardView.noteOnFallback(midi);
+            }
+
+            @Override
+            public void noteOffSchedule(int midi, long releaseMicros) {
+                keyboardView.noteOffSchedule(midi, releaseMicros);
+            }
         }, synthesizer, midiService::getTranspose, midiService.getVelocityMap());
         replayer.setOnFinished(this::onPlaybackFinished);
         replayer.getSequencer().addMetaEventListener(meta -> {
@@ -1141,7 +1151,8 @@ public class SessionController {
             running.set(true);
             statusLabel.setText("Exporting video → " + outputPath.getFileName());
 
-            Task<Void> task = exportMidiToVideo(sequence, options, cancelRequested);
+            AtomicReference<String> finalStatus = new AtomicReference<>();
+            Task<Void> task = exportMidiToVideo(sequence, options, cancelRequested, finalStatus);
             progressBar.progressProperty().bind(task.progressProperty());
             progressLabel.textProperty().bind(task.messageProperty());
 
@@ -1150,13 +1161,18 @@ public class SessionController {
                 progressBar.progressProperty().unbind();
                 progressLabel.textProperty().unbind();
                 progressBar.setProgress(1.0);
-                progressLabel.setText("Done");
+                String statusText = finalStatus.get();
+                progressLabel.setText(statusText != null ? statusText : "Done");
                 cancelButton.setDisable(false);
                 Path parentDir = options.output().toAbsolutePath().getParent();
                 if (parentDir != null) {
                     Prefs.putLastExportDir(parentDir.toString());
                 }
-                statusLabel.setText("Saved video " + options.output().getFileName());
+                if (statusText != null) {
+                    statusLabel.setText(statusText);
+                } else {
+                    statusLabel.setText("Saved video " + options.output().getFileName());
+                }
                 dialog.close();
             });
 
@@ -1195,7 +1211,10 @@ public class SessionController {
         dialog.show();
     }
 
-    private Task<Void> exportMidiToVideo(Sequence sequence, ExportOptions options, AtomicBoolean cancelFlag) {
+    private Task<Void> exportMidiToVideo(Sequence sequence,
+                                         ExportOptions options,
+                                         AtomicBoolean cancelFlag,
+                                         AtomicReference<String> finalStatus) {
         return new Task<>() {
             @Override
             protected Void call() throws Exception {
@@ -1204,6 +1223,8 @@ public class SessionController {
                 Path tempDir = Files.createTempDirectory("gmidi-export");
                 Path audioFile = tempDir.resolve("audio.wav");
                 Path videoFile = tempDir.resolve("video.mp4");
+                String audioWarning = null;
+                boolean audioRendered = false;
                 try {
                     Sequence clipped = clipSequence(sequence, options.startMicros(), options.endMicros());
                     try {
@@ -1214,6 +1235,7 @@ public class SessionController {
                                 midiService.getVelocityMap(),
                                 midiService.getReverbPreset(),
                                 midiService.getCustomSoundbankOrNull(),
+                                soundFontPath,
                                 audioFile.toFile(),
                                 micros -> {
                                     long span = Math.max(1L, options.endMicros() - options.startMicros());
@@ -1221,6 +1243,10 @@ public class SessionController {
                                     updateProgress(portion * 0.5, 1.0);
                                 },
                                 cancelFlag);
+                        audioRendered = Files.exists(audioFile) && Files.size(audioFile) > 0L;
+                    } catch (OfflineAudioRenderer.AudioUnavailableException ex) {
+                        audioWarning = ex.getMessage();
+                        audioRendered = false;
                     } catch (InterruptedException ex) {
                         if (cancelFlag.get()) {
                             updateMessage("Cancelling…");
@@ -1333,15 +1359,29 @@ public class SessionController {
                     updateProgress(0.99, 1.0);
                     long audioSize = Files.exists(audioFile) ? Files.size(audioFile) : 0L;
                     long videoSize = Files.exists(videoFile) ? Files.size(videoFile) : 0L;
-                    if (audioSize <= 0) {
-                        throw new IOException("No audio rendered. Java SoftSynth not accessible. Run with --add-exports=java.desktop/com.sun.media.sound=ALL-UNNAMED or install an external renderer.");
-                    }
                     if (videoSize <= 0) {
                         throw new IOException("No video frames rendered; aborting mux.");
                     }
-                    new VideoRecorder().muxWithAudio(videoFile, audioFile, options.output(), videoSettings);
+                    if (audioRendered && audioSize > 0) {
+                        new VideoRecorder().muxWithAudio(videoFile, audioFile, options.output(), videoSettings);
+                        updateProgress(1.0, 1.0);
+                        updateMessage("Done");
+                        return null;
+                    }
+
+                    Path output = options.output();
+                    Path parent = output.getParent();
+                    if (parent != null) {
+                        Files.createDirectories(parent);
+                    }
+                    Files.move(videoFile, output, StandardCopyOption.REPLACE_EXISTING);
+                    String warning = audioWarning != null
+                            ? audioWarning
+                            : "Audio export unavailable: Java SoftSynth couldn't be accessed. Start the app with --add-exports=java.desktop/com.sun.media.sound=ALL-UNNAMED, or install fluidsynth and ensure it's on PATH. Video saved without audio.";
+                    String finalMessage = warning + " Saved video " + output.getFileName() + '.';
+                    finalStatus.set(finalMessage);
                     updateProgress(1.0, 1.0);
-                    updateMessage("Done");
+                    updateMessage(finalMessage);
                     return null;
                 } finally {
                     try {

@@ -93,6 +93,31 @@ public class KeyboardView extends Region {
         redraw();
     }
 
+    public void noteOnFallback(int midiNote) {
+        if (midiNote < 0 || midiNote >= pressed.length) {
+            return;
+        }
+        markDown(midiNote);
+        keyReleaseMicros.remove(midiNote);
+        redraw();
+    }
+
+    public void noteOffSchedule(int midiNote, long releaseMicros) {
+        if (midiNote < 0 || midiNote >= pressed.length) {
+            return;
+        }
+        if (releaseMicros <= 0L) {
+            keyReleaseMicros.remove(midiNote);
+            if (markUp(midiNote)) {
+                redraw();
+            }
+            return;
+        }
+        markDown(midiNote);
+        keyReleaseMicros.merge(midiNote, releaseMicros, Math::max);
+        redraw();
+    }
+
     public void tickMicros(long nowMicros) {
         if (keyReleaseMicros.isEmpty()) {
             return;

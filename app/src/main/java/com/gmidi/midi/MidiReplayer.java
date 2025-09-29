@@ -50,6 +50,7 @@ public final class MidiReplayer implements AutoCloseable {
     private int nextVisualIndex;
     private long lastVisualMicros = Long.MIN_VALUE;
     private final Map<NoteKey, Long> pendingReleases = new ConcurrentHashMap<>();
+    private final Map<NoteKey, LiveKey> liveKeys = new ConcurrentHashMap<>();
 
     private MidiService.ReverbPreset reverbPreset = MidiService.ReverbPreset.ROOM;
 
@@ -71,6 +72,12 @@ public final class MidiReplayer implements AutoCloseable {
         }
 
         default void keyDownUntil(int midi, long releaseMicros) {
+        }
+
+        default void noteOnFallback(int midi, int velocity, long nanoTime) {
+        }
+
+        default void noteOffSchedule(int midi, long releaseMicros) {
         }
     }
 
@@ -241,7 +248,9 @@ public final class MidiReplayer implements AutoCloseable {
             int velocity = velocityMap.map(note.velocity);
             long release = Math.max(note.onMicros, note.releaseMicros);
             visualSink.spawnVisual(midi, velocity, spawnMicros, note.onMicros, release);
-            pendingReleases.put(new NoteKey(note.channel, midi), release);
+            NoteKey key = new NoteKey(note.channel, midi);
+            pendingReleases.put(key, release);
+            notifyScheduledRelease(key, midi, release);
         }
     }
 
@@ -272,27 +281,38 @@ public final class MidiReplayer implements AutoCloseable {
     }
 
     private void handleVisualMessage(MidiMessage message) {
-        if (message instanceof ShortMessage shortMessage) {
-            int command = shortMessage.getCommand();
-            int channel = shortMessage.getChannel();
-            int midi = shortMessage.getData1();
-            int velocity = shortMessage.getData2();
-            long positionMicros = sequencer.getMicrosecondPosition();
-            long now = positionMicros >= 0 ? positionMicros * 1_000L : 0L;
-            if (command == ShortMessage.NOTE_ON && velocity > 0) {
-                long releaseMicros = Math.max(0L, positionMicros);
-                Long scheduled = pendingReleases.remove(new NoteKey(channel, midi));
-                if (scheduled != null) {
-                    releaseMicros = Math.max(releaseMicros, scheduled);
-                }
-                long finalRelease = releaseMicros;
-                Platform.runLater(() -> {
-                    visualSink.noteOn(midi, velocity, now);
+        if (!(message instanceof ShortMessage shortMessage)) {
+            return;
+        }
+        int command = shortMessage.getCommand();
+        int channel = shortMessage.getChannel();
+        int midi = shortMessage.getData1();
+        int velocity = shortMessage.getData2();
+        long positionMicros = sequencer.getMicrosecondPosition();
+        long now = positionMicros >= 0 ? positionMicros * 1_000L : 0L;
+        NoteKey key = new NoteKey(channel, midi);
+        if (command == ShortMessage.NOTE_ON && velocity > 0) {
+            long releaseMicros = resolveOrAwaitRelease(key, Math.max(0L, positionMicros));
+            long finalRelease = releaseMicros;
+            Platform.runLater(() -> {
+                visualSink.noteOn(midi, velocity, now);
+                if (finalRelease > 0L) {
                     visualSink.keyDownUntil(midi, finalRelease);
-                });
-            } else if (command == ShortMessage.NOTE_OFF || (command == ShortMessage.NOTE_ON && velocity == 0)) {
-                Platform.runLater(() -> visualSink.noteOff(midi, now));
-            }
+                } else {
+                    visualSink.noteOnFallback(midi, velocity, now);
+                }
+            });
+            return;
+        }
+        if (command == ShortMessage.NOTE_OFF || (command == ShortMessage.NOTE_ON && velocity == 0)) {
+            long releaseMicros = updateReleaseOnNoteOff(key, Math.max(0L, positionMicros));
+            long finalRelease = releaseMicros;
+            Platform.runLater(() -> {
+                visualSink.noteOff(midi, now);
+                if (finalRelease > 0L) {
+                    visualSink.noteOffSchedule(midi, finalRelease);
+                }
+            });
         }
     }
 
@@ -351,6 +371,7 @@ public final class MidiReplayer implements AutoCloseable {
         nextVisualIndex = 0;
         lastVisualMicros = Long.MIN_VALUE;
         pendingReleases.clear();
+        liveKeys.clear();
     }
 
     private static int clamp7bit(int value) {
@@ -644,6 +665,61 @@ public final class MidiReplayer implements AutoCloseable {
     }
 
     private record NoteKey(int channel, int midi) {
+    }
+
+    private static final class LiveKey {
+        private int downCount;
+        private long releaseMicros;
+        private boolean hasRelease;
+    }
+
+    private long resolveOrAwaitRelease(NoteKey key, long fallbackMicros) {
+        LiveKey live = liveKeys.computeIfAbsent(key, k -> new LiveKey());
+        Long scheduled = pendingReleases.remove(key);
+        synchronized (live) {
+            live.downCount++;
+            if (scheduled != null) {
+                live.releaseMicros = Math.max(fallbackMicros, scheduled);
+                live.hasRelease = true;
+                return live.releaseMicros;
+            }
+            return live.hasRelease ? live.releaseMicros : -1L;
+        }
+    }
+
+    private long updateReleaseOnNoteOff(NoteKey key, long candidateMicros) {
+        LiveKey live = liveKeys.computeIfAbsent(key, k -> new LiveKey());
+        synchronized (live) {
+            if (live.downCount > 0) {
+                live.downCount--;
+            }
+            if (live.downCount <= 0) {
+                if (!live.hasRelease) {
+                    live.releaseMicros = Math.max(0L, candidateMicros);
+                    live.hasRelease = true;
+                }
+                return live.releaseMicros;
+            }
+            return live.hasRelease ? live.releaseMicros : -1L;
+        }
+    }
+
+    private void notifyScheduledRelease(NoteKey key, int midi, long releaseMicros) {
+        LiveKey live = liveKeys.computeIfAbsent(key, k -> new LiveKey());
+        boolean notify;
+        synchronized (live) {
+            long previous = live.releaseMicros;
+            long updated = Math.max(0L, releaseMicros);
+            boolean extended = !live.hasRelease || updated > previous;
+            live.releaseMicros = updated;
+            live.hasRelease = true;
+            notify = live.downCount > 0 || extended;
+        }
+        if (!notify) {
+            return;
+        }
+        long finalRelease = live.releaseMicros;
+        Platform.runLater(() -> visualSink.noteOffSchedule(midi, finalRelease));
     }
 
     static final class TickClock implements AutoCloseable {
