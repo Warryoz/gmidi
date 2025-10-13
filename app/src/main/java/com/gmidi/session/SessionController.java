@@ -68,10 +68,12 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
-import java.util.Comparator;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -1940,9 +1942,13 @@ public class SessionController {
     }
 
     private final class MidiEventRelay implements MidiService.MidiMessageListener {
+        private final Map<Integer, Long> sustainedReleases = new HashMap<>();
+        private boolean sustainPedalDown;
+
         @Override
         public void onNoteOn(int note, int velocity, long timestampNanos) {
             Platform.runLater(() -> {
+                sustainedReleases.remove(note);
                 keyboardView.press(note);
                 keyFallCanvas.onNoteOn(note, velocity, timestampNanos);
                 midiRecorder.recordNoteOn(note, velocity, timestampNanos);
@@ -1951,24 +1957,47 @@ public class SessionController {
 
         @Override
         public void onNoteOff(int note, long timestampNanos) {
-            Platform.runLater(() -> {
-                keyboardView.release(note);
-                keyFallCanvas.onNoteOff(note, timestampNanos);
-                midiRecorder.recordNoteOff(note, timestampNanos);
-            });
+            Platform.runLater(() -> handleNoteOff(note, timestampNanos));
         }
 
         @Override
         public void onSustain(boolean sustainOn, long timestampNanos) {
-            Platform.runLater(() -> {
-                keyFallCanvas.onSustain(sustainOn, timestampNanos);
-                midiRecorder.recordSustain(sustainOn, timestampNanos);
-            });
+            Platform.runLater(() -> handleSustain(sustainOn, timestampNanos));
         }
 
         @Override
         public void onTempoChange(int microsecondsPerQuarterNote, long timestampNanos) {
             Platform.runLater(() -> midiRecorder.recordTempoChange(microsecondsPerQuarterNote, timestampNanos));
+        }
+
+        private void handleNoteOff(int note, long timestampNanos) {
+            long releaseMicros = Math.max(0L, timestampNanos / 1_000L);
+            if (sustainPedalDown) {
+                sustainedReleases.merge(note, releaseMicros, Math::max);
+            } else {
+                keyboardView.release(note);
+            }
+            keyFallCanvas.onNoteOff(note, timestampNanos);
+            midiRecorder.recordNoteOff(note, timestampNanos);
+        }
+
+        private void handleSustain(boolean sustainOn, long timestampNanos) {
+            keyFallCanvas.onSustain(sustainOn, timestampNanos);
+            midiRecorder.recordSustain(sustainOn, timestampNanos);
+            if (sustainOn) {
+                sustainPedalDown = true;
+                return;
+            }
+            sustainPedalDown = false;
+            if (sustainedReleases.isEmpty()) {
+                return;
+            }
+            long releaseMicros = Math.max(0L, timestampNanos / 1_000L);
+            sustainedReleases.forEach((note, pending) -> {
+                long scheduled = Math.max(releaseMicros, pending);
+                keyboardView.noteOffSchedule(note, scheduled);
+            });
+            sustainedReleases.clear();
         }
     }
 }
