@@ -14,7 +14,6 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 import java.util.Objects;
-import java.util.function.BiConsumer;
 import java.util.function.DoubleConsumer;
 
 /**
@@ -71,7 +70,14 @@ public class KeyFallCanvas extends Canvas {
     private boolean pendingApply;
     private AnimationTimer resizeCoalescer;
 
-    private BiConsumer<Integer, Double> onImpact;
+    public interface ImpactListener {
+        void onImpact(int midi, double intensity, long releaseMicros, boolean playbackNote);
+
+        default void onReleaseUpdated(int midi, long releaseMicros, boolean playbackNote) {
+        }
+    }
+
+    private ImpactListener impactListener;
     private VelCurve velCurve = VelCurve.LINEAR;
 
     private long lastTickMicros;
@@ -225,7 +231,7 @@ public class KeyFallCanvas extends Canvas {
         }
         long impactMicros = resolveTimestampMicros(tNanos);
         long spawnMicros = impactMicros - getTravelMicros();
-        spawnInternal(midi, velocity, spawnMicros, impactMicros, impactMicros);
+        spawnInternal(midi, velocity, spawnMicros, impactMicros, impactMicros, false);
     }
 
     public void onNoteOff(int midi, long tNanos) {
@@ -292,11 +298,11 @@ public class KeyFallCanvas extends Canvas {
             spawn = impact - travel;
         }
         long release = Math.max(impact, releaseMicros);
-        spawnInternal(midi, velocity, spawn, impact, release);
+        spawnInternal(midi, velocity, spawn, impact, release, true);
     }
 
-    public void setOnImpact(BiConsumer<Integer, Double> onImpact) {
-        this.onImpact = onImpact;
+    public void setOnImpact(ImpactListener listener) {
+        this.impactListener = listener;
     }
 
     public void setVelocityCurve(VelCurve curve) {
@@ -348,9 +354,7 @@ public class KeyFallCanvas extends Canvas {
             }
             if (!note.impactNotified && nowMicros >= note.impactMicros) {
                 note.impactNotified = true;
-                if (onImpact != null) {
-                    onImpact.accept(note.key, note.intensity);
-                }
+                notifyImpact(note);
             }
             if (travel <= 0) {
                 hasVisible = true;
@@ -514,7 +518,8 @@ public class KeyFallCanvas extends Canvas {
                                int velocity,
                                long spawnMicros,
                                long impactMicros,
-                               long releaseMicros) {
+                               long releaseMicros,
+                               boolean playbackNote) {
         FallingNote note = pool.pollFirst();
         if (note == null) {
             note = new FallingNote();

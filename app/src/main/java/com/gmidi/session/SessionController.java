@@ -135,6 +135,7 @@ public class SessionController {
     private VelCurve velocityCurve = VelCurve.LINEAR;
     private MidiService.ReverbPreset preferredReverb = MidiService.ReverbPreset.ROOM;
     private boolean playbackActive;
+    private final PlaybackHighlightController playbackHighlights = new PlaybackHighlightController();
     private static final double DEFAULT_KB_HEIGHT_RATIO = 0.24;
     private static final double KB_MIN = 140.0;
     private static final double KB_MAX = 260.0;
@@ -199,7 +200,23 @@ public class SessionController {
             videoSettings.setOutputDirectory(storedDir);
         }
 
-        this.keyFallCanvas.setOnImpact((note, intensity) -> keyboardView.flash(note, intensity));
+        this.keyFallCanvas.setOnImpact(new KeyFallCanvas.ImpactListener() {
+            @Override
+            public void onImpact(int note, double intensity, long releaseMicros, boolean playbackNote) {
+                if (playbackNote) {
+                    playbackHighlights.handleImpact(note, intensity, releaseMicros);
+                } else {
+                    keyboardView.flash(note, intensity);
+                }
+            }
+
+            @Override
+            public void onReleaseUpdated(int note, long releaseMicros, boolean playbackNote) {
+                if (playbackNote) {
+                    playbackHighlights.handleReleaseUpdate(note, releaseMicros);
+                }
+            }
+        });
         this.keyFallCanvas.setVelocityCurve(velocityCurve);
         this.keyFallCanvas.setVisualOffsetMillis(visualOffsetMillis);
         this.keyFallCanvas.setFallDurationSeconds(storedFallSeconds);
@@ -483,17 +500,17 @@ public class SessionController {
 
             @Override
             public void keyDownUntil(int midi, long releaseMicros) {
-                keyboardView.keyDownUntil(midi, releaseMicros);
+                playbackHighlights.prepareKeyDown(midi, releaseMicros);
             }
 
             @Override
             public void noteOnFallback(int midi, int velocity, long tNanos) {
-                keyboardView.noteOnFallback(midi);
+                playbackHighlights.markFallback(midi);
             }
 
             @Override
             public void noteOffSchedule(int midi, long releaseMicros) {
-                keyboardView.noteOffSchedule(midi, releaseMicros);
+                playbackHighlights.handleReleaseUpdate(midi, releaseMicros);
             }
         }, synthesizer, midiService::getTranspose, midiService.getVelocityMap());
         replayer.setOnFinished(this::onPlaybackFinished);
@@ -1557,8 +1574,84 @@ public class SessionController {
     }
 
     private void releaseAllKeys() {
+        playbackHighlights.reset();
         for (int note = 0; note < 128; note++) {
             keyboardView.release(note);
+        }
+    }
+
+    private final class PlaybackHighlightController {
+        private final Map<Integer, PlaybackKeyState> states = new HashMap<>();
+
+        void prepareKeyDown(int midi, long releaseMicros) {
+            PlaybackKeyState state = states.computeIfAbsent(midi, k -> new PlaybackKeyState());
+            long resolved = Math.max(0L, releaseMicros);
+            if (resolved > 0L) {
+                if (resolved > state.releaseMicros) {
+                    state.releaseMicros = resolved;
+                }
+                state.hasRelease = true;
+            }
+            state.pressed = false;
+        }
+
+        void markFallback(int midi) {
+            PlaybackKeyState state = states.computeIfAbsent(midi, k -> new PlaybackKeyState());
+            state.hasRelease = false;
+            state.releaseMicros = 0L;
+            state.pressed = false;
+        }
+
+        void handleImpact(int midi, double intensity, long releaseMicros) {
+            PlaybackKeyState state = states.computeIfAbsent(midi, k -> new PlaybackKeyState());
+            long resolved = Math.max(0L, releaseMicros);
+            if (state.hasRelease) {
+                resolved = Math.max(resolved, state.releaseMicros);
+            } else if (resolved > 0L) {
+                state.releaseMicros = resolved;
+                state.hasRelease = true;
+            }
+            if (state.hasRelease) {
+                state.releaseMicros = Math.max(state.releaseMicros, resolved);
+                keyboardView.keyDownUntil(midi, state.releaseMicros);
+            } else {
+                keyboardView.noteOnFallback(midi);
+            }
+            keyboardView.flash(midi, intensity);
+            state.pressed = true;
+        }
+
+        void handleReleaseUpdate(int midi, long releaseMicros) {
+            PlaybackKeyState state = states.computeIfAbsent(midi, k -> new PlaybackKeyState());
+            long resolved = Math.max(0L, releaseMicros);
+            if (resolved > 0L) {
+                if (resolved > state.releaseMicros) {
+                    state.releaseMicros = resolved;
+                }
+                state.hasRelease = true;
+            } else {
+                state.hasRelease = false;
+                state.releaseMicros = 0L;
+            }
+            if (state.pressed) {
+                keyboardView.noteOffSchedule(midi, resolved);
+                if (resolved <= 0L) {
+                    state.pressed = false;
+                }
+            }
+            if (!state.pressed && !state.hasRelease) {
+                states.remove(midi);
+            }
+        }
+
+        void reset() {
+            states.clear();
+        }
+
+        private final class PlaybackKeyState {
+            long releaseMicros;
+            boolean hasRelease;
+            boolean pressed;
         }
     }
 
