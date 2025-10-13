@@ -244,10 +244,7 @@ public class KeyFallCanvas extends Canvas {
                     note.sustainHeld = true;
                     note.sustainReleaseMicros = Math.max(note.sustainReleaseMicros, resolved);
                 } else {
-                    if (note.releaseMicros != resolved) {
-                        note.releaseMicros = resolved;
-                        notifyReleaseUpdate(note);
-                    }
+                    note.releaseMicros = resolved;
                 }
                 break;
             }
@@ -267,10 +264,7 @@ public class KeyFallCanvas extends Canvas {
                 }
                 long pending = Math.max(note.sustainReleaseMicros, note.releaseMicros);
                 long finalRelease = Math.max(Math.max(pending, note.impactMicros), releaseMicros);
-                if (note.releaseMicros != finalRelease) {
-                    note.releaseMicros = finalRelease;
-                    notifyReleaseUpdate(note);
-                }
+                note.releaseMicros = finalRelease;
                 note.sustainHeld = false;
                 note.sustainReleaseMicros = 0L;
             }
@@ -433,30 +427,6 @@ public class KeyFallCanvas extends Canvas {
         g.restore();
     }
 
-    private void notifyImpact(FallingNote note) {
-        if (impactListener == null) {
-            return;
-        }
-        long release = resolveReleaseMicros(note);
-        impactListener.onImpact(note.key, note.intensity, release, note.playbackNote);
-    }
-
-    private void notifyReleaseUpdate(FallingNote note) {
-        if (impactListener == null || !note.impactNotified) {
-            return;
-        }
-        long release = resolveReleaseMicros(note);
-        impactListener.onReleaseUpdated(note.key, release, note.playbackNote);
-    }
-
-    private long resolveReleaseMicros(FallingNote note) {
-        long release = Math.max(note.releaseMicros, note.impactMicros);
-        if (note.sustainHeld) {
-            release = Math.max(release, note.sustainReleaseMicros);
-        }
-        return release;
-    }
-
     private double noteLengthPixels(FallingNote note,
                                     double keyboardLine,
                                     long travelMicros,
@@ -538,7 +508,6 @@ public class KeyFallCanvas extends Canvas {
         double intensity;
         boolean sustainHeld;
         long sustainReleaseMicros;
-        boolean playbackNote;
     }
 
     public long getTravelMicros() {
@@ -575,7 +544,6 @@ public class KeyFallCanvas extends Canvas {
         note.intensity = mapped;
         note.sustainHeld = false;
         note.sustainReleaseMicros = 0L;
-        note.playbackNote = playbackNote;
         active.add(note);
         requestRender();
     }
