@@ -355,15 +355,24 @@ public class KeyFallCanvas extends Canvas {
                 pool.addLast(active.remove(i));
                 continue;
             }
-            if (!note.impactNotified && nowMicros >= note.impactMicros) {
-                note.impactNotified = true;
-                notifyImpact(note);
+            double rawHead;
+            if (travel > 0) {
+                rawHead = ((nowMicros - note.spawnMicros) / (double) travel) * keyboardLine;
+                if (!note.impactNotified && rawHead >= keyboardLine - 0.5) {
+                    note.impactNotified = true;
+                    notifyImpact(note);
+                }
+            } else {
+                rawHead = keyboardLine;
+                if (!note.impactNotified && nowMicros >= note.impactMicros) {
+                    note.impactNotified = true;
+                    notifyImpact(note);
+                }
             }
             if (travel <= 0) {
                 hasVisible = true;
                 continue;
             }
-            double rawHead = ((nowMicros - note.spawnMicros) / (double) travel) * keyboardLine;
             double lengthPx = noteLengthPixels(note, keyboardLine, travel, nowMicros);
             double rawTail = rawHead - lengthPx;
             double headY = clamp(rawHead, 0.0, keyboardLine);
