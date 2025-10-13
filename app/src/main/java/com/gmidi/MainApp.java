@@ -120,7 +120,7 @@ public class MainApp extends Application {
 
         BorderPane visualiserPane = new BorderPane();
         visualiserPane.setCenter(keyFallViewport);
-        BorderPane.setMargin(keyFallViewport, Insets.EMPTY);
+        BorderPane.setMargin(keyFallViewport, new Insets(0, 16, 0, 16));
         visualiserPane.setBottom(keyboardView);
         BorderPane.setMargin(keyboardView, new Insets(0, 16, 16, 16));
 

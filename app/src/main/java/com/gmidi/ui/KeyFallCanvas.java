@@ -76,6 +76,7 @@ public class KeyFallCanvas extends Canvas {
 
     private long lastTickMicros;
     private long visualOffsetMicros;
+    private boolean sustainDown;
 
     public KeyFallCanvas() {
         super(1, 1);
@@ -232,14 +233,39 @@ public class KeyFallCanvas extends Canvas {
         for (int i = active.size() - 1; i >= 0; i--) {
             FallingNote note = active.get(i);
             if (note.key == midi) {
-                note.releaseMicros = Math.max(Math.max(note.releaseMicros, note.impactMicros), releaseMicros);
+                long resolved = Math.max(Math.max(note.releaseMicros, note.impactMicros), releaseMicros);
+                if (sustainDown) {
+                    note.sustainHeld = true;
+                    note.sustainReleaseMicros = Math.max(note.sustainReleaseMicros, resolved);
+                } else {
+                    note.releaseMicros = resolved;
+                }
                 break;
             }
         }
     }
 
     public void onSustain(boolean down, long tNanos) {
-        // The visualiser ignores sustain; audio and keyboard state still honour it elsewhere.
+        if (sustainDown == down) {
+            return;
+        }
+        sustainDown = down;
+        if (!sustainDown) {
+            long releaseMicros = resolveTimestampMicros(tNanos);
+            for (FallingNote note : active) {
+                if (!note.sustainHeld) {
+                    continue;
+                }
+                long pending = Math.max(note.sustainReleaseMicros, note.releaseMicros);
+                long finalRelease = Math.max(Math.max(pending, note.impactMicros), releaseMicros);
+                note.releaseMicros = finalRelease;
+                note.sustainHeld = false;
+                note.sustainReleaseMicros = 0L;
+            }
+            requestRender();
+        } else {
+            requestRender();
+        }
     }
 
     public void clear() {
@@ -247,6 +273,7 @@ public class KeyFallCanvas extends Canvas {
             pool.addLast(note);
         }
         active.clear();
+        sustainDown = false;
         requestRender();
     }
 
@@ -314,7 +341,8 @@ public class KeyFallCanvas extends Canvas {
 
         for (int i = active.size() - 1; i >= 0; i--) {
             FallingNote note = active.get(i);
-            if (nowMicros >= note.releaseMicros) {
+            long expiry = note.sustainHeld && sustainDown ? Long.MAX_VALUE : note.releaseMicros;
+            if (nowMicros >= expiry) {
                 pool.addLast(active.remove(i));
                 continue;
             }
@@ -329,7 +357,7 @@ public class KeyFallCanvas extends Canvas {
                 continue;
             }
             double rawHead = ((nowMicros - note.spawnMicros) / (double) travel) * keyboardLine;
-            double lengthPx = noteLengthPixels(note, keyboardLine, travel);
+            double lengthPx = noteLengthPixels(note, keyboardLine, travel, nowMicros);
             double rawTail = rawHead - lengthPx;
             double headY = clamp(rawHead, 0.0, keyboardLine);
             double tailY = clamp(rawTail, 0.0, keyboardLine);
@@ -360,7 +388,7 @@ public class KeyFallCanvas extends Canvas {
         final double keyboardLine = viewportHeight;
         final long travel = getTravelMicros();
         for (FallingNote note : active) {
-            double lengthPx = noteLengthPixels(note, keyboardLine, travel);
+            double lengthPx = noteLengthPixels(note, keyboardLine, travel, nowMicros);
             double rawHead = travel > 0
                     ? ((nowMicros - note.spawnMicros) / (double) travel) * keyboardLine
                     : keyboardLine;
@@ -395,11 +423,18 @@ public class KeyFallCanvas extends Canvas {
         g.restore();
     }
 
-    private double noteLengthPixels(FallingNote note, double keyboardLine, long travelMicros) {
+    private double noteLengthPixels(FallingNote note,
+                                    double keyboardLine,
+                                    long travelMicros,
+                                    long nowMicros) {
         if (travelMicros <= 0) {
             return note.trailThickness;
         }
-        double durationMicros = Math.max(0.0, note.releaseMicros - note.impactMicros);
+        long releaseMicros = note.releaseMicros;
+        if (note.sustainHeld && sustainDown) {
+            releaseMicros = Math.max(Math.max(nowMicros, note.sustainReleaseMicros), releaseMicros);
+        }
+        double durationMicros = Math.max(0.0, releaseMicros - note.impactMicros);
         double lengthPx = (durationMicros / (double) travelMicros) * keyboardLine;
         return Math.max(0.0, lengthPx);
     }
@@ -467,6 +502,8 @@ public class KeyFallCanvas extends Canvas {
         double trailThickness;
         double baseAlpha;
         double intensity;
+        boolean sustainHeld;
+        long sustainReleaseMicros;
     }
 
     public long getTravelMicros() {
@@ -500,6 +537,8 @@ public class KeyFallCanvas extends Canvas {
         note.trailThickness = lerp(MIN_TRAIL_THICKNESS, MAX_TRAIL_THICKNESS, mapped);
         note.baseAlpha = lerp(MIN_TRAIL_ALPHA, MAX_TRAIL_ALPHA, mapped);
         note.intensity = mapped;
+        note.sustainHeld = false;
+        note.sustainReleaseMicros = 0L;
         active.add(note);
         requestRender();
     }
