@@ -1,6 +1,5 @@
 package com.gmidi.ui;
 
-import javafx.animation.AnimationTimer;
 import javafx.geometry.Insets;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
@@ -21,6 +20,7 @@ import java.util.Map;
 public class KeyboardView extends Region {
 
     private static final double FLASH_DURATION_MS = 120.0;
+    private static final long FLASH_DURATION_MICROS = (long) (FLASH_DURATION_MS * 1_000.0);
     private static final Color FLASH_COLOR = Color.web("#2CE4D0");
     private static final double MIN_HEIGHT = 140.0;
     private static final double MAX_HEIGHT = 260.0;
@@ -28,22 +28,13 @@ public class KeyboardView extends Region {
 
     private final Canvas canvas = new Canvas(800, 160);
     private final boolean[] pressed = new boolean[128];
-    private final long[] flashStartNanos = new long[128];
+    private final long[] flashStartMicros = new long[128];
+    private final long[] flashEndMicros = new long[128];
     private final double[] flashIntensity = new double[128];
-    private boolean flashTimerActive;
-    private final AnimationTimer flashTimer = new AnimationTimer() {
-        @Override
-        public void handle(long now) {
-            if (!redraw(now)) {
-                stop();
-                flashTimerActive = false;
-            }
-        }
-    };
+    private boolean flashActive;
 
     private final Map<Integer, Tooltip> tooltips = new HashMap<>();
     private Tooltip activeTooltip;
-    private boolean flashActiveDuringDraw;
     private final Map<Integer, Long> keyReleaseMicros = new HashMap<>();
 
     public KeyboardView() {
@@ -119,44 +110,63 @@ public class KeyboardView extends Region {
     }
 
     public void tickMicros(long nowMicros) {
-        if (keyReleaseMicros.isEmpty()) {
-            return;
-        }
         boolean changed = false;
-        Iterator<Map.Entry<Integer, Long>> it = keyReleaseMicros.entrySet().iterator();
-        while (it.hasNext()) {
-            Map.Entry<Integer, Long> entry = it.next();
-            if (nowMicros >= entry.getValue()) {
-                it.remove();
-                if (markUp(entry.getKey())) {
-                    changed = true;
+        if (!keyReleaseMicros.isEmpty()) {
+            Iterator<Map.Entry<Integer, Long>> it = keyReleaseMicros.entrySet().iterator();
+            while (it.hasNext()) {
+                Map.Entry<Integer, Long> entry = it.next();
+                if (nowMicros >= entry.getValue()) {
+                    it.remove();
+                    if (markUp(entry.getKey())) {
+                        changed = true;
+                    }
                 }
             }
         }
-        if (changed) {
-            redraw();
+        boolean flashNeedsRedraw = updateFlash(nowMicros);
+        if (changed || flashNeedsRedraw) {
+            redraw(nowMicros);
         }
     }
 
+    private boolean updateFlash(long nowMicros) {
+        if (!flashActive) {
+            return false;
+        }
+        boolean active = false;
+        boolean changed = false;
+        for (int i = 0; i < flashEndMicros.length; i++) {
+            long end = flashEndMicros[i];
+            if (end == 0L) {
+                continue;
+            }
+            if (nowMicros >= end) {
+                flashStartMicros[i] = 0L;
+                flashEndMicros[i] = 0L;
+                flashIntensity[i] = 0.0;
+                changed = true;
+            } else {
+                active = true;
+            }
+        }
+        flashActive = active;
+        return changed || active;
+    }
+
     public void flash(int midiNote, double intensity) {
-        if (midiNote < 0 || midiNote >= flashStartNanos.length) {
+        if (midiNote < 0 || midiNote >= flashStartMicros.length) {
             return;
         }
         double clamped = Math.max(0.0, Math.min(1.0, intensity));
         if (clamped <= 0.0) {
             return;
         }
-        flashStartNanos[midiNote] = System.nanoTime();
+        long nowMicros = currentMicros();
+        flashStartMicros[midiNote] = nowMicros;
+        flashEndMicros[midiNote] = nowMicros + FLASH_DURATION_MICROS;
         flashIntensity[midiNote] = clamped;
-        ensureFlashTimer();
-        redraw();
-    }
-
-    private void ensureFlashTimer() {
-        if (!flashTimerActive) {
-            flashTimer.start();
-            flashTimerActive = true;
-        }
+        flashActive = true;
+        redraw(nowMicros);
     }
 
     private void handleHover(MouseEvent event, boolean inside) {
@@ -204,31 +214,28 @@ public class KeyboardView extends Region {
         redraw();
     }
 
-    private void redraw() {
-        redraw(System.nanoTime());
+    private long currentMicros() {
+        return System.nanoTime() / 1_000L;
     }
 
-    private boolean redraw(long nowNanos) {
+    private void redraw() {
+        redraw(currentMicros());
+    }
+
+    private void redraw(long nowMicros) {
         double width = canvas.getWidth();
         double height = canvas.getHeight();
         if (width <= 0 || height <= 0) {
-            return false;
+            return;
         }
         GraphicsContext gc = canvas.getGraphicsContext2D();
         gc.clearRect(0, 0, width, height);
 
-        flashActiveDuringDraw = false;
-        drawWhiteKeys(gc, width, height, nowNanos);
-        drawBlackKeys(gc, width, height, nowNanos);
-
-        if (!flashActiveDuringDraw && flashTimerActive) {
-            flashTimer.stop();
-            flashTimerActive = false;
-        }
-        return flashActiveDuringDraw;
+        drawWhiteKeys(gc, width, height, nowMicros);
+        drawBlackKeys(gc, width, height, nowMicros);
     }
 
-    private void drawWhiteKeys(GraphicsContext gc, double width, double height, long nowNanos) {
+    private void drawWhiteKeys(GraphicsContext gc, double width, double height, long nowMicros) {
         double whiteKeyHeight = height;
         Color base = Color.web("#F0F0F0");
         Color pressedColor = Color.web("#2CE4D0", 0.55);
@@ -246,7 +253,7 @@ public class KeyboardView extends Region {
                 gc.setFill(pressedColor);
                 gc.fillRoundRect(keyLeft + 2, 2, keyWidth - 4, whiteKeyHeight - 4, 10, 10);
             }
-            double flashAlpha = computeFlashAlpha(note, nowNanos);
+            double flashAlpha = computeFlashAlpha(note, nowMicros);
             if (flashAlpha > 0) {
                 gc.setFill(FLASH_COLOR.deriveColor(0, 1, 1, flashAlpha));
                 gc.fillRoundRect(keyLeft + 2, 2, keyWidth - 4, whiteKeyHeight - 4, 10, 10);
@@ -257,7 +264,7 @@ public class KeyboardView extends Region {
         }
     }
 
-    private void drawBlackKeys(GraphicsContext gc, double width, double height, long nowNanos) {
+    private void drawBlackKeys(GraphicsContext gc, double width, double height, long nowMicros) {
         double blackKeyHeight = PianoKeyLayout.blackKeyHeight(height);
         Color base = Color.web("#1E1E1E");
         Color highlight = Color.web("#2CE4D0");
@@ -271,7 +278,7 @@ public class KeyboardView extends Region {
             boolean isPressed = pressed[note];
             gc.setFill(isPressed ? highlight : base);
             gc.fillRoundRect(keyLeft, 0, keyWidth, blackKeyHeight, 8, 8);
-            double flashAlpha = computeFlashAlpha(note, nowNanos);
+            double flashAlpha = computeFlashAlpha(note, nowMicros);
             if (flashAlpha > 0) {
                 gc.setFill(FLASH_COLOR.deriveColor(0, 1, 1, flashAlpha));
                 gc.fillRoundRect(keyLeft, 0, keyWidth, blackKeyHeight, 8, 8);
@@ -282,23 +289,23 @@ public class KeyboardView extends Region {
         }
     }
 
-    private double computeFlashAlpha(int midiNote, long nowNanos) {
-        long start = flashStartNanos[midiNote];
-        if (start == 0) {
-            return 0;
+    private double computeFlashAlpha(int midiNote, long nowMicros) {
+        long start = flashStartMicros[midiNote];
+        long end = flashEndMicros[midiNote];
+        if (start == 0L || end <= start || nowMicros >= end) {
+            return 0.0;
         }
-        double elapsedMs = (nowNanos - start) / 1_000_000.0;
-        if (elapsedMs >= FLASH_DURATION_MS) {
-            flashStartNanos[midiNote] = 0;
-            flashIntensity[midiNote] = 0;
-            return 0;
-        }
-        flashActiveDuringDraw = true;
         double base = flashIntensity[midiNote];
-        if (base <= 0) {
-            return 0;
+        if (base <= 0.0) {
+            return 0.0;
         }
-        return base * (1.0 - (elapsedMs / FLASH_DURATION_MS));
+        double duration = end - start;
+        double elapsed = nowMicros - start;
+        double remaining = 1.0 - (elapsed / duration);
+        if (remaining <= 0.0) {
+            return 0.0;
+        }
+        return base * remaining;
     }
 
     private double clampHeight(double desired) {
