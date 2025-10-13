@@ -242,9 +242,12 @@ public class KeyFallCanvas extends Canvas {
                 long resolved = Math.max(Math.max(note.releaseMicros, note.impactMicros), releaseMicros);
                 if (sustainDown) {
                     note.sustainHeld = true;
-                    note.sustainReleaseMicros = Math.max(note.sustainReleaseMicros, resolved);
+                    if (resolved > note.sustainReleaseMicros) {
+                        note.sustainReleaseMicros = resolved;
+                        notifyReleaseUpdate(note);
+                    }
                 } else {
-                    note.releaseMicros = resolved;
+                    updateReleaseMicros(note, resolved);
                 }
                 break;
             }
@@ -264,7 +267,7 @@ public class KeyFallCanvas extends Canvas {
                 }
                 long pending = Math.max(note.sustainReleaseMicros, note.releaseMicros);
                 long finalRelease = Math.max(Math.max(pending, note.impactMicros), releaseMicros);
-                note.releaseMicros = finalRelease;
+                updateReleaseMicros(note, finalRelease);
                 note.sustainHeld = false;
                 note.sustainReleaseMicros = 0L;
             }
@@ -422,6 +425,13 @@ public class KeyFallCanvas extends Canvas {
             }
             g.setGlobalAlpha(note.baseAlpha);
             g.fillRoundRect(note.x, top, note.w, height, 6, 6);
+            g.setGlobalAlpha(Math.min(1.0, note.baseAlpha + 0.2));
+            g.setStroke(NOTE_COLOR.deriveColor(0, 1, 0.75, 1));
+            g.setLineWidth(Math.max(1.0, note.w * 0.03));
+            g.strokeRoundRect(note.x + 0.5, top + 0.5,
+                    Math.max(0.0, note.w - 1.0),
+                    Math.max(0.0, height - 1.0),
+                    6, 6);
         }
         g.setGlobalAlpha(1.0);
         g.restore();
@@ -508,10 +518,50 @@ public class KeyFallCanvas extends Canvas {
         double intensity;
         boolean sustainHeld;
         long sustainReleaseMicros;
+        boolean playbackNote;
+        long notifiedReleaseMicros;
     }
 
     public long getTravelMicros() {
         return travelMicros;
+    }
+
+    private void notifyImpact(FallingNote note) {
+        if (impactListener == null) {
+            return;
+        }
+        long release = effectiveReleaseMicros(note);
+        impactListener.onImpact(note.key, note.intensity, release, note.playbackNote);
+        note.notifiedReleaseMicros = release;
+    }
+
+    private void notifyReleaseUpdate(FallingNote note) {
+        if (impactListener == null) {
+            return;
+        }
+        long release = effectiveReleaseMicros(note);
+        if (release == note.notifiedReleaseMicros) {
+            return;
+        }
+        impactListener.onReleaseUpdated(note.key, release, note.playbackNote);
+        note.notifiedReleaseMicros = release;
+    }
+
+    private long effectiveReleaseMicros(FallingNote note) {
+        long release = note.releaseMicros;
+        if (note.sustainHeld) {
+            release = Math.max(release, note.sustainReleaseMicros);
+        }
+        return release;
+    }
+
+    private void updateReleaseMicros(FallingNote note, long releaseMicros) {
+        long clamped = Math.max(note.impactMicros, releaseMicros);
+        if (clamped == note.releaseMicros) {
+            return;
+        }
+        note.releaseMicros = clamped;
+        notifyReleaseUpdate(note);
     }
 
     private void spawnInternal(int midi,
@@ -544,6 +594,8 @@ public class KeyFallCanvas extends Canvas {
         note.intensity = mapped;
         note.sustainHeld = false;
         note.sustainReleaseMicros = 0L;
+        note.playbackNote = playbackNote;
+        note.notifiedReleaseMicros = Long.MIN_VALUE;
         active.add(note);
         requestRender();
     }
