@@ -1598,37 +1598,48 @@ public class SessionController {
     private final class PlaybackHighlightController {
         private final Map<Integer, PlaybackKeyState> states = new HashMap<>();
 
-        void prepareKeyDown(int midi, long releaseMicros) {
+        void prepareKeyDown(int midi, long keyUpMicros) {
             PlaybackKeyState state = states.computeIfAbsent(midi, k -> new PlaybackKeyState());
-            long resolved = Math.max(0L, releaseMicros);
+            long resolved = Math.max(0L, keyUpMicros);
             if (resolved > 0L) {
-                if (resolved > state.releaseMicros) {
-                    state.releaseMicros = resolved;
+                if (!state.hasKeyUp || resolved > state.keyUpMicros) {
+                    state.keyUpMicros = resolved;
                 }
-                state.hasRelease = true;
+                state.hasKeyUp = true;
+            } else {
+                state.keyUpMicros = 0L;
+                state.hasKeyUp = false;
             }
+            state.tailReleaseMicros = 0L;
+            state.hasTailRelease = false;
             state.pressed = false;
         }
 
         void markFallback(int midi) {
             PlaybackKeyState state = states.computeIfAbsent(midi, k -> new PlaybackKeyState());
-            state.hasRelease = false;
-            state.releaseMicros = 0L;
+            state.keyUpMicros = 0L;
+            state.hasKeyUp = false;
+            state.tailReleaseMicros = 0L;
+            state.hasTailRelease = false;
             state.pressed = false;
         }
 
         void handleImpact(int midi, double intensity, long releaseMicros, long sessionTriggerMicros) {
             PlaybackKeyState state = states.computeIfAbsent(midi, k -> new PlaybackKeyState());
-            long resolved = Math.max(0L, releaseMicros);
-            if (state.hasRelease) {
-                resolved = Math.max(resolved, state.releaseMicros);
-            } else if (resolved > 0L) {
-                state.releaseMicros = resolved;
-                state.hasRelease = true;
+            long resolvedTail = Math.max(0L, releaseMicros);
+            if (resolvedTail > 0L) {
+                if (!state.hasTailRelease || resolvedTail > state.tailReleaseMicros) {
+                    state.tailReleaseMicros = resolvedTail;
+                }
+                state.hasTailRelease = true;
+            } else {
+                state.tailReleaseMicros = 0L;
+                state.hasTailRelease = false;
             }
-            if (state.hasRelease) {
-                state.releaseMicros = Math.max(state.releaseMicros, resolved);
-                keyboardView.keyDownUntil(midi, state.releaseMicros);
+            if (state.hasKeyUp) {
+                keyboardView.keyDownUntil(midi, state.keyUpMicros);
+            } else if (state.hasTailRelease) {
+                keyboardView.keyDownUntil(midi, state.tailReleaseMicros);
             } else {
                 keyboardView.noteOnFallback(midi);
             }
@@ -1640,21 +1651,30 @@ public class SessionController {
             PlaybackKeyState state = states.computeIfAbsent(midi, k -> new PlaybackKeyState());
             long resolved = Math.max(0L, releaseMicros);
             if (resolved > 0L) {
-                if (resolved > state.releaseMicros) {
-                    state.releaseMicros = resolved;
+                if (!state.hasKeyUp) {
+                    state.keyUpMicros = resolved;
+                    state.hasKeyUp = true;
+                    if (state.pressed) {
+                        keyboardView.noteOffSchedule(midi, resolved);
+                    }
+                } else if (resolved > state.keyUpMicros) {
+                    if (!state.hasTailRelease || resolved > state.tailReleaseMicros) {
+                        state.tailReleaseMicros = resolved;
+                    }
+                    state.hasTailRelease = true;
                 }
-                state.hasRelease = true;
             } else {
-                state.hasRelease = false;
-                state.releaseMicros = 0L;
-            }
-            if (state.pressed) {
-                keyboardView.noteOffSchedule(midi, resolved);
-                if (resolved <= 0L) {
+                if (state.pressed && !state.hasKeyUp) {
+                    keyboardView.noteOffSchedule(midi, 0L);
                     state.pressed = false;
                 }
+                state.tailReleaseMicros = 0L;
+                state.hasTailRelease = false;
+                if (!state.hasKeyUp) {
+                    state.keyUpMicros = 0L;
+                }
             }
-            if (!state.pressed && !state.hasRelease) {
+            if (!state.pressed && !state.hasKeyUp && !state.hasTailRelease) {
                 states.remove(midi);
             }
         }
@@ -1664,8 +1684,10 @@ public class SessionController {
         }
 
         private final class PlaybackKeyState {
-            long releaseMicros;
-            boolean hasRelease;
+            long keyUpMicros;
+            boolean hasKeyUp;
+            long tailReleaseMicros;
+            boolean hasTailRelease;
             boolean pressed;
         }
     }
@@ -2058,13 +2080,10 @@ public class SessionController {
     }
 
     private final class MidiEventRelay implements MidiService.MidiMessageListener {
-        private final Map<Integer, Long> sustainedReleases = new HashMap<>();
-        private boolean sustainPedalDown;
 
         @Override
         public void onNoteOn(int note, int velocity, long timestampNanos) {
             Platform.runLater(() -> {
-                sustainedReleases.remove(note);
                 liveReleasedBeforeImpact.remove(note);
                 liveAwaitingImpact.add(note);
                 keyFallCanvas.onNoteOn(note, velocity, timestampNanos);
@@ -2088,13 +2107,8 @@ public class SessionController {
         }
 
         private void handleNoteOff(int note, long timestampNanos) {
-            long releaseMicros = Math.max(0L, timestampNanos / 1_000L);
             boolean awaitingImpact = liveAwaitingImpact.contains(note);
-            if (sustainPedalDown) {
-                sustainedReleases.merge(note, releaseMicros, Math::max);
-            } else {
-                keyboardView.release(note);
-            }
+            keyboardView.release(note);
             if (awaitingImpact) {
                 liveReleasedBeforeImpact.add(note);
             }
@@ -2105,20 +2119,6 @@ public class SessionController {
         private void handleSustain(boolean sustainOn, long timestampNanos) {
             keyFallCanvas.onSustain(sustainOn, timestampNanos);
             midiRecorder.recordSustain(sustainOn, timestampNanos);
-            if (sustainOn) {
-                sustainPedalDown = true;
-                return;
-            }
-            sustainPedalDown = false;
-            if (sustainedReleases.isEmpty()) {
-                return;
-            }
-            long releaseMicros = Math.max(0L, timestampNanos / 1_000L);
-            sustainedReleases.forEach((note, pending) -> {
-                long scheduled = Math.max(releaseMicros, pending);
-                keyboardView.noteOffSchedule(note, scheduled);
-            });
-            sustainedReleases.clear();
         }
     }
 }
