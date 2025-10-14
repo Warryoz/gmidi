@@ -75,6 +75,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -117,6 +119,9 @@ public class SessionController {
     private double smoothedFps = 60.0;
     private long lastVideoCaptureNanos;
     private long videoFrameIntervalNanos;
+
+    private final Set<Integer> liveAwaitingImpact = new HashSet<>();
+    private final Set<Integer> liveReleasedBeforeImpact = new HashSet<>();
 
     private Path currentMidiFile;
     private Path currentVideoFile;
@@ -211,6 +216,11 @@ public class SessionController {
                 if (playbackNote) {
                     playbackHighlights.handleImpact(note, intensity, releaseMicros, sessionTriggerMicros);
                 } else {
+                    boolean releasedBeforeImpact = liveReleasedBeforeImpact.remove(note);
+                    liveAwaitingImpact.remove(note);
+                    if (!releasedBeforeImpact) {
+                        keyboardView.noteOnFallback(note);
+                    }
                     keyboardView.flash(note, intensity, sessionTriggerMicros);
                 }
             }
@@ -2053,7 +2063,8 @@ public class SessionController {
         public void onNoteOn(int note, int velocity, long timestampNanos) {
             Platform.runLater(() -> {
                 sustainedReleases.remove(note);
-                keyboardView.press(note);
+                liveReleasedBeforeImpact.remove(note);
+                liveAwaitingImpact.add(note);
                 keyFallCanvas.onNoteOn(note, velocity, timestampNanos);
                 midiRecorder.recordNoteOn(note, velocity, timestampNanos);
             });
@@ -2076,10 +2087,14 @@ public class SessionController {
 
         private void handleNoteOff(int note, long timestampNanos) {
             long releaseMicros = Math.max(0L, timestampNanos / 1_000L);
+            boolean awaitingImpact = liveAwaitingImpact.contains(note);
             if (sustainPedalDown) {
                 sustainedReleases.merge(note, releaseMicros, Math::max);
             } else {
                 keyboardView.release(note);
+            }
+            if (awaitingImpact) {
+                liveReleasedBeforeImpact.add(note);
             }
             keyFallCanvas.onNoteOff(note, timestampNanos);
             midiRecorder.recordNoteOff(note, timestampNanos);
