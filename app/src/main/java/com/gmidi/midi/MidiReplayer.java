@@ -247,10 +247,11 @@ public final class MidiReplayer implements AutoCloseable {
             }
             int velocity = velocityMap.map(note.velocity);
             long release = Math.max(note.onMicros, note.releaseMicros);
+            long keyUp = Math.max(note.onMicros, note.keyUpMicros);
             visualSink.spawnVisual(midi, velocity, spawnMicros, note.onMicros, release);
             NoteKey key = new NoteKey(note.channel, midi);
-            pendingReleases.put(key, release);
-            notifyScheduledRelease(key, midi, release);
+            pendingReleases.put(key, keyUp);
+            notifyScheduledRelease(key, midi, keyUp);
         }
     }
 
@@ -474,15 +475,27 @@ public final class MidiReplayer implements AutoCloseable {
                         ? tracker.resolveReleaseTick(note.offTick)
                         : note.offTick;
                 long onMicros = Math.max(0L, clock.microsAt(note.onTick));
-                long releaseMicros = Math.max(onMicros, clock.microsAt(releaseTick));
-                notes.add(new VisualNote(note.key, note.channel, onMicros, releaseMicros, note.velocity));
+                long keyUpMicros = Math.max(onMicros, clock.microsAt(note.offTick));
+                long releaseMicros = Math.max(keyUpMicros, clock.microsAt(releaseTick));
+                notes.add(new VisualNote(
+                        note.key,
+                        note.channel,
+                        onMicros,
+                        keyUpMicros,
+                        releaseMicros,
+                        note.velocity));
             }
         }
         notes.sort(Comparator.comparingLong(VisualNote::onMicros));
         return notes;
     }
 
-    public static record VisualNote(int key, int channel, long onMicros, long releaseMicros, int velocity) {
+    public static record VisualNote(int key,
+                                    int channel,
+                                    long onMicros,
+                                    long keyUpMicros,
+                                    long releaseMicros,
+                                    int velocity) {
     }
 
     private static final class RawNote {
