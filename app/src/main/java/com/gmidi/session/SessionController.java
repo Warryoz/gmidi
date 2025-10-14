@@ -1681,11 +1681,13 @@ public class SessionController {
                 int midi = Math.max(0, Math.min(127, note.key()));
                 int velocity = velocityMap != null ? velocityMap.map(note.velocity()) : note.velocity();
                 long onMicros = Math.max(0L, note.onMicros());
-                long releaseMicros = Math.max(onMicros, note.releaseMicros());
+                long keyUpMicros = Math.max(onMicros, note.keyUpMicros());
+                long releaseMicros = Math.max(keyUpMicros, note.releaseMicros());
                 mapped.add(new MidiReplayer.VisualNote(
                         midi,
                         note.channel(),
                         onMicros,
+                        keyUpMicros,
                         releaseMicros,
                         Math.max(0, Math.min(127, velocity))));
             }
@@ -1731,7 +1733,7 @@ public class SessionController {
             }
             while (nextImpact < notes.size() && notes.get(nextImpact).onMicros() <= micros) {
                 MidiReplayer.VisualNote note = notes.get(nextImpact);
-                keyboardView.keyDownUntil(note.key(), note.releaseMicros());
+                keyboardView.keyDownUntil(note.key(), note.keyUpMicros());
                 nextImpact++;
             }
             keyboardView.tickMicros(micros);
