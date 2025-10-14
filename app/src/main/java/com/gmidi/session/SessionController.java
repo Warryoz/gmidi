@@ -207,10 +207,11 @@ public class SessionController {
                                  long releaseMicros,
                                  boolean playbackNote,
                                  long triggerMicros) {
+                long sessionTriggerMicros = toSessionMicros(triggerMicros);
                 if (playbackNote) {
-                    playbackHighlights.handleImpact(note, intensity, releaseMicros, triggerMicros);
+                    playbackHighlights.handleImpact(note, intensity, releaseMicros, sessionTriggerMicros);
                 } else {
-                    keyboardView.flash(note, intensity, triggerMicros);
+                    keyboardView.flash(note, intensity, sessionTriggerMicros);
                 }
             }
 
@@ -1606,7 +1607,7 @@ public class SessionController {
             state.pressed = false;
         }
 
-        void handleImpact(int midi, double intensity, long releaseMicros, long triggerMicros) {
+        void handleImpact(int midi, double intensity, long releaseMicros, long sessionTriggerMicros) {
             PlaybackKeyState state = states.computeIfAbsent(midi, k -> new PlaybackKeyState());
             long resolved = Math.max(0L, releaseMicros);
             if (state.hasRelease) {
@@ -1621,7 +1622,7 @@ public class SessionController {
             } else {
                 keyboardView.noteOnFallback(midi);
             }
-            keyboardView.flash(midi, intensity, triggerMicros);
+            keyboardView.flash(midi, intensity, sessionTriggerMicros);
             state.pressed = true;
         }
 
@@ -1799,6 +1800,12 @@ public class SessionController {
     private String stripExtension(String filename) {
         int dot = filename.lastIndexOf('.');
         return dot >= 0 ? filename.substring(0, dot) : filename;
+    }
+
+    private long toSessionMicros(long visualMicros) {
+        long offsetMicros = visualOffsetMillis * 1_000L;
+        long sessionMicros = visualMicros - offsetMicros;
+        return sessionMicros < 0L ? 0L : sessionMicros;
     }
 
     private void onAnimationFrame(long now) {
