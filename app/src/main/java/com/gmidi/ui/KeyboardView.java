@@ -258,7 +258,7 @@ public class KeyboardView extends Region {
     private void drawWhiteKeys(GraphicsContext gc, double width, double height, long nowMicros) {
         double whiteKeyHeight = height;
         Color base = Color.web("#F0F0F0");
-        Color pressedColor = Color.web("#2CE4D0", 0.55);
+        Color pressedBase = base.deriveColor(0, 1, 0.92, 1);
         Color border = Color.web("#272727");
 
         for (int note : PianoKeyLayout.allNotes()) {
@@ -267,12 +267,8 @@ public class KeyboardView extends Region {
             }
             double keyLeft = PianoKeyLayout.keyLeft(note, width);
             double keyWidth = PianoKeyLayout.keyWidth(note, width);
-            gc.setFill(base.deriveColor(0, 1, pressed[note] ? 0.85 : 1.0, 1));
+            gc.setFill(pressed[note] ? pressedBase : base);
             gc.fillRoundRect(keyLeft, 0, keyWidth, whiteKeyHeight, 12, 12);
-            if (pressed[note]) {
-                gc.setFill(pressedColor);
-                gc.fillRoundRect(keyLeft + 2, 2, keyWidth - 4, whiteKeyHeight - 4, 10, 10);
-            }
             double flashAlpha = computeFlashAlpha(note, nowMicros);
             if (flashAlpha > 0) {
                 gc.setFill(FLASH_COLOR.deriveColor(0, 1, 1, flashAlpha));
@@ -287,7 +283,7 @@ public class KeyboardView extends Region {
     private void drawBlackKeys(GraphicsContext gc, double width, double height, long nowMicros) {
         double blackKeyHeight = PianoKeyLayout.blackKeyHeight(height);
         Color base = Color.web("#1E1E1E");
-        Color highlight = Color.web("#2CE4D0");
+        Color pressedBase = base.deriveColor(0, 1, 1.15, 1);
 
         for (int note : PianoKeyLayout.allNotes()) {
             if (PianoKeyLayout.isWhiteKey(note)) {
@@ -296,7 +292,7 @@ public class KeyboardView extends Region {
             double keyLeft = PianoKeyLayout.keyLeft(note, width);
             double keyWidth = PianoKeyLayout.keyWidth(note, width);
             boolean isPressed = pressed[note];
-            gc.setFill(isPressed ? highlight : base);
+            gc.setFill(isPressed ? pressedBase : base);
             gc.fillRoundRect(keyLeft, 0, keyWidth, blackKeyHeight, 8, 8);
             double flashAlpha = computeFlashAlpha(note, nowMicros);
             if (flashAlpha > 0) {
