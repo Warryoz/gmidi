@@ -202,11 +202,15 @@ public class SessionController {
 
         this.keyFallCanvas.setOnImpact(new KeyFallCanvas.ImpactListener() {
             @Override
-            public void onImpact(int note, double intensity, long releaseMicros, boolean playbackNote) {
+            public void onImpact(int note,
+                                 double intensity,
+                                 long releaseMicros,
+                                 boolean playbackNote,
+                                 long triggerMicros) {
                 if (playbackNote) {
-                    playbackHighlights.handleImpact(note, intensity, releaseMicros);
+                    playbackHighlights.handleImpact(note, intensity, releaseMicros, triggerMicros);
                 } else {
-                    keyboardView.flash(note, intensity);
+                    keyboardView.flash(note, intensity, triggerMicros);
                 }
             }
 
@@ -1602,7 +1606,7 @@ public class SessionController {
             state.pressed = false;
         }
 
-        void handleImpact(int midi, double intensity, long releaseMicros) {
+        void handleImpact(int midi, double intensity, long releaseMicros, long triggerMicros) {
             PlaybackKeyState state = states.computeIfAbsent(midi, k -> new PlaybackKeyState());
             long resolved = Math.max(0L, releaseMicros);
             if (state.hasRelease) {
@@ -1617,7 +1621,7 @@ public class SessionController {
             } else {
                 keyboardView.noteOnFallback(midi);
             }
-            keyboardView.flash(midi, intensity);
+            keyboardView.flash(midi, intensity, triggerMicros);
             state.pressed = true;
         }
 

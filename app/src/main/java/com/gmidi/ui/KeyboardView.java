@@ -32,6 +32,7 @@ public class KeyboardView extends Region {
     private final long[] flashEndMicros = new long[128];
     private final double[] flashIntensity = new double[128];
     private boolean flashActive;
+    private long lastNowMicros = -1L;
 
     private final Map<Integer, Tooltip> tooltips = new HashMap<>();
     private Tooltip activeTooltip;
@@ -110,12 +111,13 @@ public class KeyboardView extends Region {
     }
 
     public void tickMicros(long nowMicros) {
+        long resolvedNow = resolveNowMicros(nowMicros);
         boolean changed = false;
         if (!keyReleaseMicros.isEmpty()) {
             Iterator<Map.Entry<Integer, Long>> it = keyReleaseMicros.entrySet().iterator();
             while (it.hasNext()) {
                 Map.Entry<Integer, Long> entry = it.next();
-                if (nowMicros >= entry.getValue()) {
+                if (resolvedNow >= entry.getValue()) {
                     it.remove();
                     if (markUp(entry.getKey())) {
                         changed = true;
@@ -123,9 +125,9 @@ public class KeyboardView extends Region {
                 }
             }
         }
-        boolean flashNeedsRedraw = updateFlash(nowMicros);
+        boolean flashNeedsRedraw = updateFlash(resolvedNow);
         if (changed || flashNeedsRedraw) {
-            redraw(nowMicros);
+            redraw(resolvedNow);
         }
     }
 
@@ -154,6 +156,10 @@ public class KeyboardView extends Region {
     }
 
     public void flash(int midiNote, double intensity) {
+        flash(midiNote, intensity, currentMicros());
+    }
+
+    public void flash(int midiNote, double intensity, long nowMicros) {
         if (midiNote < 0 || midiNote >= flashStartMicros.length) {
             return;
         }
@@ -161,12 +167,12 @@ public class KeyboardView extends Region {
         if (clamped <= 0.0) {
             return;
         }
-        long nowMicros = currentMicros();
-        flashStartMicros[midiNote] = nowMicros;
-        flashEndMicros[midiNote] = nowMicros + FLASH_DURATION_MICROS;
+        long resolvedNow = resolveNowMicros(nowMicros);
+        flashStartMicros[midiNote] = resolvedNow;
+        flashEndMicros[midiNote] = resolvedNow + FLASH_DURATION_MICROS;
         flashIntensity[midiNote] = clamped;
         flashActive = true;
-        redraw(nowMicros);
+        redraw(resolvedNow);
     }
 
     private void handleHover(MouseEvent event, boolean inside) {
@@ -218,11 +224,25 @@ public class KeyboardView extends Region {
         return System.nanoTime() / 1_000L;
     }
 
+    private long resolveNowMicros(long candidate) {
+        if (candidate >= 0L) {
+            lastNowMicros = candidate;
+            return candidate;
+        }
+        if (lastNowMicros >= 0L) {
+            return lastNowMicros;
+        }
+        long fallback = currentMicros();
+        lastNowMicros = fallback;
+        return fallback;
+    }
+
     private void redraw() {
-        redraw(currentMicros());
+        redraw(lastNowMicros >= 0 ? lastNowMicros : currentMicros());
     }
 
     private void redraw(long nowMicros) {
+        long resolvedNow = resolveNowMicros(nowMicros);
         double width = canvas.getWidth();
         double height = canvas.getHeight();
         if (width <= 0 || height <= 0) {
@@ -231,8 +251,8 @@ public class KeyboardView extends Region {
         GraphicsContext gc = canvas.getGraphicsContext2D();
         gc.clearRect(0, 0, width, height);
 
-        drawWhiteKeys(gc, width, height, nowMicros);
-        drawBlackKeys(gc, width, height, nowMicros);
+        drawWhiteKeys(gc, width, height, resolvedNow);
+        drawBlackKeys(gc, width, height, resolvedNow);
     }
 
     private void drawWhiteKeys(GraphicsContext gc, double width, double height, long nowMicros) {
