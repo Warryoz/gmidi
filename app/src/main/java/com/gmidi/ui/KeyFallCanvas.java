@@ -71,7 +71,7 @@ public class KeyFallCanvas extends Canvas {
     private AnimationTimer resizeCoalescer;
 
     public interface ImpactListener {
-        void onImpact(int midi, double intensity, long releaseMicros, boolean playbackNote);
+        void onImpact(int midi, double intensity, long releaseMicros, boolean playbackNote, long triggerMicros);
 
         default void onReleaseUpdated(int midi, long releaseMicros, boolean playbackNote) {
         }
@@ -360,13 +360,13 @@ public class KeyFallCanvas extends Canvas {
                 rawHead = ((nowMicros - note.spawnMicros) / (double) travel) * keyboardLine;
                 if (!note.impactNotified && rawHead >= keyboardLine - 0.5) {
                     note.impactNotified = true;
-                    notifyImpact(note);
+                    notifyImpact(note, nowMicros);
                 }
             } else {
                 rawHead = keyboardLine;
                 if (!note.impactNotified && nowMicros >= note.impactMicros) {
                     note.impactNotified = true;
-                    notifyImpact(note);
+                    notifyImpact(note, nowMicros);
                 }
             }
             if (travel <= 0) {
@@ -535,12 +535,12 @@ public class KeyFallCanvas extends Canvas {
         return travelMicros;
     }
 
-    private void notifyImpact(FallingNote note) {
+    private void notifyImpact(FallingNote note, long nowMicros) {
         if (impactListener == null) {
             return;
         }
         long release = effectiveReleaseMicros(note);
-        impactListener.onImpact(note.key, note.intensity, release, note.playbackNote);
+        impactListener.onImpact(note.key, note.intensity, release, note.playbackNote, nowMicros);
         note.notifiedReleaseMicros = release;
     }
 
